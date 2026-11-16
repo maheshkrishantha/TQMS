@@ -9,6 +9,7 @@ const optionalNonEmptyString = z.preprocess(
 const configSchema = z.object({
   DATABASE_URL: z.string().url(),
   PORT: z.coerce.number().int().positive().default(4000),
+  HOST: z.string().default("0.0.0.0"),
   CLIENT_ORIGIN: z.string().optional(),
   JWT_SECRET: z.string().min(32),
   ADMIN_EMAIL: z.string().email().optional(),

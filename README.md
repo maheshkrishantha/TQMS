@@ -127,9 +127,12 @@ The API creates the first Administrator account from the environment variables a
    - `CLIENT_ORIGIN`: exact public web-client origin
    - `NODE_ENV=production`
    - `PORT`: API listen port (defaults to `4000`)
+   - `HOST`: API bind address (defaults to `0.0.0.0`; set to `127.0.0.1` for a native install behind a same-server proxy)
    - `SMTP_HOST` and `SMTP_FROM`: alert email server and sender; `SMTP_PORT` defaults to `587`, `SMTP_SECURE` defaults to `false`, and `SMTP_USER`/`SMTP_PASSWORD` must be supplied together when authentication is required
 
 3. Run `npm run start --workspace=api` under your server's process manager and put the API behind HTTPS. Permit inbound API traffic only as required by your hosting setup.
+
+For a native install behind Tailscale Serve/Funnel or another same-server reverse proxy, set `HOST=127.0.0.1` so the API is not directly reachable on other network interfaces. Leave `HOST` unset for Docker Compose so the container can accept connections through its Docker network.
 
 ### Docker API server and Cloudflare Pages
 

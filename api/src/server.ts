@@ -46,7 +46,7 @@ async function ensureInitialAdministrator() {
 async function start() {
   await prisma.$connect();
   await ensureInitialAdministrator();
-  httpServer = app.listen(config.PORT, () => {
+  httpServer = app.listen(config.PORT, config.HOST, () => {
     console.info(`TQMS API listening on port ${config.PORT}`);
   });
   let notificationsRunning = false;
