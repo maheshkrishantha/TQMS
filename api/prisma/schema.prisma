@@ -1,0 +1,701 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  DIRECTOR
+  TENDER_MANAGER
+  SALES_REP
+  COSTING
+  ACCOUNTS
+}
+
+model CustomRole {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  baseRole    Role
+  permissions Json
+  users       User[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+enum RegistrationPaymentMode {
+  CASH
+  BANK_TRANSFER
+  CHEQUE
+  OTHER
+}
+
+enum RegistrationPaymentDocumentType {
+  CHEQUE_IMAGE
+  RECEIPT_COPY
+}
+
+enum TenderType {
+  OPEN
+  LETTERS
+  WALK_IN
+}
+
+enum TenderStatus {
+  NEW
+  PRICE_REQUESTED
+  QUOTED
+  SUBMITTED
+  TENDER_READING_DONE
+  AWARDED
+  LOST
+  CANCELLED
+  PO_RECEIVED
+  COMPLETED
+}
+
+enum TenderDocumentType {
+  TENDER_DOCUMENT
+  ADDENDUM
+  OTHER
+}
+
+enum BidBondStatus {
+  REQUESTED
+  ISSUED
+  SUBMITTED
+  RETURNED
+  EXPIRED
+}
+
+enum TenderReadingMethod {
+  CALL
+  VISIT
+}
+
+enum PredictionStatus {
+  READY
+  INSUFFICIENT_DATA
+}
+
+enum AwardType {
+  WHOLE
+  ITEM_WISE
+}
+
+enum PerformanceBondStatus {
+  NOT_REQUIRED
+  REQUESTED
+  ISSUED
+  SUBMITTED
+  RETURNED
+  EXPIRED
+}
+
+enum DeliveryStatus {
+  PENDING
+  PARTIAL
+  DELIVERED
+}
+
+enum PricingMethod {
+  PERCENTAGE
+  DIRECT
+}
+
+enum CostBaseMethod {
+  LOWEST
+  AVERAGE
+  SELECTED
+}
+
+enum QuotationStatus {
+  DRAFT
+  PENDING_TENDER_MANAGER
+  PENDING_DIRECTOR
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id           String    @id @default(uuid())
+  fullName     String
+  email        String    @unique
+  passwordHash String
+  role         Role      @default(SALES_REP)
+  customRoleId String?
+  customRole   CustomRole? @relation(fields: [customRoleId], references: [id], onDelete: Restrict)
+  active       Boolean   @default(true)
+  sessionVersion Int     @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  auditLogs    AuditLog[]
+  assignedTenders Tender[] @relation("TenderResponsibleRep")
+  requestedSupplierPrices SupplierPrice[] @relation("SupplierPriceRequester")
+  createdQuotations Quotation[] @relation("QuotationCreator")
+  managerApprovedQuotations Quotation[] @relation("QuotationManagerApprover")
+  directorApprovedQuotations Quotation[] @relation("QuotationDirectorApprover")
+  reportedTenderReadings TenderReading[] @relation("TenderReadingReporter")
+  editedReadingBidHistory ReadingBidHistory[] @relation("ReadingBidHistoryEditor")
+  pricePredictionRuns PricePredictionRun[] @relation("PricePredictionRequester")
+  notifications Notification[]
+  areaAssignments UserAreaAssignment[]
+}
+
+model UserAreaAssignment {
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  province String
+  district String @default("")
+
+  @@id([userId, province, district])
+}
+
+model CompanyProfile {
+  id                     String   @id @default("default")
+  companyName            String
+  address                String
+  email                  String
+  officePhone1           String
+  officePhone2           String?
+  brNumber               String
+  vatRegistrationNumber  String
+  logoUrl                String?
+  quotationValidityDays  Int      @default(30)
+  vatRate                Decimal  @default(0) @db.Decimal(5, 2)
+  minimumMarginPercent   Decimal  @default(0) @db.Decimal(5, 2)
+  currency               String   @default("LKR")
+  theme                  String   @default("forest")
+  updatedAt              DateTime @updatedAt
+}
+
+model Item {
+  id                 String   @id @default(uuid())
+  code               String   @unique
+  name               String
+  categoryId         String?
+  category           ItemCategory? @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  brandId            String?
+  brand              Brand? @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  modelSpecification String?
+  unitId             String
+  unit               Unit     @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  warrantyMonths     Int?
+  active             Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  registrationItems  RegistrationItem[]
+  tenderItems        TenderItem[]
+
+  @@index([categoryId])
+  @@index([brandId])
+  @@index([unitId])
+}
+
+model ItemCategory {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  active    Boolean  @default(true)
+  items     Item[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Brand {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  active    Boolean  @default(true)
+  items     Item[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Unit {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  abbreviation String
+  active       Boolean  @default(true)
+  items        Item[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Competitor {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  address       String?
+  email         String?
+  contactNumber String?
+  contactPerson String?
+  province      String?
+  district      String?
+  notes         String?
+  active        Boolean  @default(true)
+  readingBids   ReadingBid[]
+  expectedOnTenders TenderExpectedBidder[]
+  awardLines    TenderAwardLine[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Supplier {
+  id            String          @id @default(uuid())
+  name          String          @unique
+  contactPerson String?
+  contactNumber String?
+  email         String?
+  address       String?
+  active        Boolean         @default(true)
+  supplierPrices SupplierPrice[]
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+}
+
+model Institution {
+  id            String         @id @default(uuid())
+  name          String         @unique
+  address       String?
+  province      String?
+  district      String?
+  contactNumber1 String?
+  contactNumber2 String?
+  contactPerson String?
+  registrations Registration[]
+  tenders       Tender[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model Registration {
+  id                String             @id @default(uuid())
+  institutionId     String
+  institution       Institution        @relation(fields: [institutionId], references: [id], onDelete: Restrict)
+  year              Int
+  registrationFee   Decimal            @db.Decimal(14, 2)
+  bondAmount        Decimal            @default(0) @db.Decimal(14, 2)
+  registrationDate  DateTime
+  expiryDate        DateTime
+  notes             String?
+  renewedFromId     String?
+  renewedFrom       Registration?      @relation("RegistrationRenewals", fields: [renewedFromId], references: [id], onDelete: Restrict)
+  renewals          Registration[]     @relation("RegistrationRenewals")
+  items             RegistrationItem[]
+  payments          RegistrationPayment[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@unique([institutionId, year])
+  @@index([expiryDate])
+}
+
+model RegistrationItem {
+  registrationId String
+  itemId         String
+  registration   Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  item           Item         @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@id([registrationId, itemId])
+}
+
+model RegistrationPayment {
+  id             String                   @id @default(uuid())
+  registrationId String
+  registration   Registration             @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  mode           RegistrationPaymentMode
+  amount         Decimal                   @db.Decimal(14, 2)
+  paymentDate    DateTime
+  reference      String?
+  bank           String?
+  paidBy         String?
+  documents      RegistrationPaymentDocument[]
+  createdAt      DateTime                  @default(now())
+}
+
+model RegistrationPaymentDocument {
+  id          String                           @id @default(uuid())
+  paymentId   String
+  payment     RegistrationPayment              @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  type        RegistrationPaymentDocumentType
+  fileName    String
+  contentType String
+  data        Bytes
+  updatedAt   DateTime                         @updatedAt
+
+  @@unique([paymentId, type])
+}
+
+model Tender {
+  id                    String      @id @default(uuid())
+  referenceNumber       String
+  type                  TenderType
+  status                TenderStatus @default(NEW)
+  institutionId         String
+  institution           Institution @relation(fields: [institutionId], references: [id], onDelete: Restrict)
+  source                String?
+  letterReceivedAt      DateTime?
+  visitAt               DateTime?
+  contactOfficer        String?
+  closingAt             DateTime
+  province               String?
+  district               String?
+  responsibleRepId      String
+  responsibleRep        User        @relation("TenderResponsibleRep", fields: [responsibleRepId], references: [id], onDelete: Restrict)
+  bidBondRequired       Boolean     @default(false)
+  bidBondAmount         Decimal?    @db.Decimal(14, 2)
+  bidBondBank           String?
+  bidBondNumber         String?
+  bidBondIssueDate      DateTime?
+  bidBondExpiryDate     DateTime?
+  bidBondStatus         BidBondStatus?
+  notes                  String?
+  items                  TenderItem[]
+  quotations             Quotation[]
+  readings               TenderReading[]
+  expectedBidders        TenderExpectedBidder[]
+  awards                 TenderAward[]
+  purchaseOrders         PurchaseOrder[]
+  documents              TenderDocument[]
+  pricePredictionRuns    PricePredictionRun[]
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime    @updatedAt
+
+  @@unique([institutionId, referenceNumber])
+  @@index([closingAt, status])
+  @@index([responsibleRepId, closingAt])
+  @@index([type, status])
+}
+
+model TenderItem {
+  id                 String          @id @default(uuid())
+  tenderId           String
+  tender             Tender          @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  itemId             String?
+  item               Item?           @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  description        String
+  specification      String?
+  quantity           Decimal         @db.Decimal(14, 3)
+  unit               String
+  estimatedUnitPrice Decimal?        @db.Decimal(14, 2)
+  supplierPrices     SupplierPrice[]
+  quotationLines     QuotationLine[]
+  readingBidLines   ReadingBidLine[]
+  awardLines         TenderAwardLine[]
+  purchaseOrderLines PurchaseOrderLine[]
+  pricePredictionRuns PricePredictionRun[]
+  createdAt          DateTime        @default(now())
+
+  @@index([tenderId])
+}
+
+model TenderDocument {
+  id          String             @id @default(uuid())
+  tenderId    String
+  tender      Tender             @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  type        TenderDocumentType @default(TENDER_DOCUMENT)
+  fileName    String
+  contentType String
+  data        Bytes
+  createdAt   DateTime           @default(now())
+
+  @@index([tenderId, createdAt])
+}
+
+model TenderReading {
+  id              String              @id @default(uuid())
+  tenderId        String
+  tender          Tender              @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  readingDate     DateTime
+  method          TenderReadingMethod
+  reportedById    String
+  reportedBy      User                @relation("TenderReadingReporter", fields: [reportedById], references: [id], onDelete: Restrict)
+  notes           String?
+  bids            ReadingBid[]
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([tenderId, readingDate])
+}
+
+model ReadingBid {
+  id            String             @id @default(uuid())
+  readingId     String
+  reading       TenderReading      @relation(fields: [readingId], references: [id], onDelete: Cascade)
+  competitorId  String?
+  competitor    Competitor?        @relation(fields: [competitorId], references: [id], onDelete: SetNull)
+  companyName   String
+  isOurCompany  Boolean            @default(false)
+  totalPrice    Decimal?           @db.Decimal(14, 2)
+  lines         ReadingBidLine[]
+  history       ReadingBidHistory[]
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([readingId])
+  @@index([competitorId])
+}
+
+model ReadingBidLine {
+  id           String     @id @default(uuid())
+  readingBidId String
+  readingBid   ReadingBid @relation(fields: [readingBidId], references: [id], onDelete: Cascade)
+  tenderItemId String
+  tenderItem   TenderItem @relation(fields: [tenderItemId], references: [id], onDelete: Restrict)
+  unitPrice    Decimal    @db.Decimal(14, 2)
+
+  @@unique([readingBidId, tenderItemId])
+  @@index([tenderItemId])
+}
+
+model ReadingBidHistory {
+  id           String     @id @default(uuid())
+  readingBidId String
+  readingBid   ReadingBid @relation(fields: [readingBidId], references: [id], onDelete: Cascade)
+  editedById   String
+  editedBy     User       @relation("ReadingBidHistoryEditor", fields: [editedById], references: [id], onDelete: Restrict)
+  previousData Json
+  changedAt    DateTime   @default(now())
+
+  @@index([readingBidId, changedAt])
+}
+
+model PricePredictionRun {
+  id                    String           @id @default(uuid())
+  tenderId              String
+  tender                Tender           @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  tenderItemId          String
+  tenderItem            TenderItem       @relation(fields: [tenderItemId], references: [id], onDelete: Cascade)
+  requestedById         String
+  requestedBy           User             @relation("PricePredictionRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  status                PredictionStatus
+  modelVersion          String           @default("rule-v1")
+  totalReadingCount     Int
+  winningSampleCount    Int
+  competitorSampleCount Int
+  targetWinProbability  Decimal?         @db.Decimal(5, 4)
+  chosenBidPrice        Decimal?         @db.Decimal(14, 2)
+  chosenWinProbability  Decimal?         @db.Decimal(5, 4)
+  predictedLow          Decimal?         @db.Decimal(14, 2)
+  predictedMostLikely   Decimal?         @db.Decimal(14, 2)
+  predictedHigh         Decimal?         @db.Decimal(14, 2)
+  recommendedBidPrice   Decimal?         @db.Decimal(14, 2)
+  currentUnitCost       Decimal?         @db.Decimal(14, 2)
+  expectedGrossProfit   Decimal?         @db.Decimal(14, 2)
+  supportTenderIds      Json
+  createdAt             DateTime         @default(now())
+
+  @@index([tenderId, tenderItemId, createdAt])
+  @@index([status, createdAt])
+}
+
+model TenderExpectedBidder {
+  tenderId     String
+  tender       Tender     @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  competitorId String
+  competitor   Competitor @relation(fields: [competitorId], references: [id], onDelete: Restrict)
+  createdAt    DateTime   @default(now())
+
+  @@id([tenderId, competitorId])
+}
+
+model TenderAward {
+  id          String           @id @default(uuid())
+  tenderId    String
+  tender      Tender           @relation(fields: [tenderId], references: [id], onDelete: Restrict)
+  type        AwardType
+  awardedAt   DateTime
+  reason      String?
+  lines       TenderAwardLine[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([tenderId, awardedAt])
+}
+
+model TenderAwardLine {
+  id                  String      @id @default(uuid())
+  awardId             String
+  award               TenderAward @relation(fields: [awardId], references: [id], onDelete: Cascade)
+  tenderItemId        String
+  tenderItem          TenderItem  @relation(fields: [tenderItemId], references: [id], onDelete: Restrict)
+  winnerCompetitorId  String?
+  winnerCompetitor    Competitor? @relation(fields: [winnerCompetitorId], references: [id], onDelete: SetNull)
+  winnerName          String
+  wonByUs             Boolean
+  quantity            Decimal     @db.Decimal(14, 3)
+  unitPrice           Decimal     @db.Decimal(14, 2)
+  lossReason          String?
+
+  @@unique([awardId, tenderItemId])
+}
+
+model PurchaseOrder {
+  id                       String                @id @default(uuid())
+  tenderId                 String
+  tender                   Tender                @relation(fields: [tenderId], references: [id], onDelete: Restrict)
+  quotationId              String?
+  quotation                Quotation?            @relation(fields: [quotationId], references: [id], onDelete: Restrict)
+  poNumber                 String
+  poDate                   DateTime
+  deliveryDate             DateTime?
+  terms                    String?
+  paymentTerms             String?
+  documentUrl              String?
+  deliveryStatus           DeliveryStatus        @default(PENDING)
+  invoiceNumber            String?
+  paymentReceived          Boolean               @default(false)
+  performanceBondRequired  Boolean               @default(false)
+  performanceBondAmount    Decimal?              @db.Decimal(14, 2)
+  performanceBondBank      String?
+  performanceBondNumber    String?
+  performanceBondIssueDate DateTime?
+  performanceBondExpiryDate DateTime?
+  performanceBondStatus    PerformanceBondStatus @default(NOT_REQUIRED)
+  documents                PurchaseOrderDocument[]
+  lines                    PurchaseOrderLine[]
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+
+  @@unique([tenderId, poNumber])
+  @@index([tenderId, poDate])
+  @@index([performanceBondExpiryDate])
+}
+
+model PurchaseOrderLine {
+  id              String        @id @default(uuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  tenderItemId    String
+  tenderItem      TenderItem    @relation(fields: [tenderItemId], references: [id], onDelete: Restrict)
+  quantity        Decimal       @db.Decimal(14, 3)
+  unitPrice       Decimal       @db.Decimal(14, 2)
+  createdAt       DateTime      @default(now())
+
+  @@unique([purchaseOrderId, tenderItemId])
+}
+
+model PurchaseOrderDocument {
+  id              String        @id @default(uuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  fileName        String
+  contentType     String
+  data            Bytes
+  createdAt       DateTime      @default(now())
+
+  @@index([purchaseOrderId, createdAt])
+}
+
+model SupplierPrice {
+  id               String     @id @default(uuid())
+  tenderItemId     String
+  tenderItem       TenderItem @relation(fields: [tenderItemId], references: [id], onDelete: Cascade)
+  supplierId       String
+  supplier         Supplier   @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  supplierName     String
+  unitPrice        Decimal    @db.Decimal(14, 2)
+  requestedById    String
+  requestedBy      User       @relation("SupplierPriceRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  givenBy          String?
+  receivedAt       DateTime   @default(now())
+  validUntil       DateTime?
+  notes            String?
+  quotationLines   QuotationLine[]
+  createdAt        DateTime   @default(now())
+
+  @@index([supplierId])
+  @@index([tenderItemId, unitPrice])
+  @@index([validUntil])
+}
+
+model Quotation {
+  id                       String          @id @default(uuid())
+  tenderId                 String
+  tender                   Tender          @relation(fields: [tenderId], references: [id], onDelete: Restrict)
+  version                  Int
+  status                   QuotationStatus @default(DRAFT)
+  validityDays             Int
+  vatRate                  Decimal         @db.Decimal(5, 2)
+  discountAmount           Decimal         @default(0) @db.Decimal(14, 2)
+  subtotal                 Decimal         @db.Decimal(14, 2)
+  vatAmount                Decimal         @db.Decimal(14, 2)
+  totalAmount              Decimal         @db.Decimal(14, 2)
+  grossProfit              Decimal         @db.Decimal(14, 2)
+  terms                    String?
+  createdById              String
+  createdBy                User            @relation("QuotationCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  managerApprovedById      String?
+  managerApprovedBy        User?           @relation("QuotationManagerApprover", fields: [managerApprovedById], references: [id], onDelete: SetNull)
+  managerApprovedAt        DateTime?
+  directorApprovedById     String?
+  directorApprovedBy       User?           @relation("QuotationDirectorApprover", fields: [directorApprovedById], references: [id], onDelete: SetNull)
+  directorApprovedAt       DateTime?
+  rejectionReason          String?
+  submittedForApprovalAt   DateTime?
+  lines                    QuotationLine[]
+  purchaseOrders           PurchaseOrder[]
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+
+  @@unique([tenderId, version])
+  @@index([status, createdAt])
+}
+
+model QuotationLine {
+  id                       String          @id @default(uuid())
+  quotationId              String
+  quotation                Quotation       @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  tenderItemId             String
+  tenderItem               TenderItem      @relation(fields: [tenderItemId], references: [id], onDelete: Restrict)
+  pricingMethod            PricingMethod
+  costBaseMethod           CostBaseMethod?
+  supplierPriceId          String?
+  supplierPrice            SupplierPrice?  @relation(fields: [supplierPriceId], references: [id], onDelete: Restrict)
+  baseUnitCost             Decimal         @db.Decimal(14, 2)
+  transportCost            Decimal         @default(0) @db.Decimal(14, 2)
+  installationCost         Decimal         @default(0) @db.Decimal(14, 2)
+  bondCost                 Decimal         @default(0) @db.Decimal(14, 2)
+  commissionCost           Decimal         @default(0) @db.Decimal(14, 2)
+  marginPercent            Decimal?        @db.Decimal(8, 2)
+  quantity                 Decimal         @db.Decimal(14, 3)
+  sellingUnitPrice         Decimal         @db.Decimal(14, 2)
+  lineSubtotal             Decimal         @db.Decimal(14, 2)
+  grossProfit              Decimal         @db.Decimal(14, 2)
+  createdAt                DateTime        @default(now())
+
+  @@unique([quotationId, tenderItemId])
+  @@index([tenderItemId])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId, createdAt])
+}
+
+model Notification {
+  id              String   @id @default(uuid())
+  type            String
+  title           String
+  message         String
+  referenceId     String
+  leadDays        Int
+  recipientId     String?
+  recipient       User?    @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  acknowledgedAt  DateTime?
+  snoozedUntil    DateTime?
+  emailSentAt     DateTime?
+  createdAt       DateTime @default(now())
+
+  @@unique([type, referenceId, leadDays, recipientId])
+  @@index([recipientId, createdAt])
+  @@index([emailSentAt, createdAt])
+}

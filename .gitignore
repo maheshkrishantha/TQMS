@@ -1,0 +1,14 @@
+node_modules/
+client/dist/
+api/dist/
+api/prisma.config.js
+.wrangler/
+*.log
+/backups/
+.env*
+!.env.example
+!.env.production.example
+api/.env*
+!api/.env.example
+client/.env*
+!client/.env.example
