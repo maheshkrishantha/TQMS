@@ -46,6 +46,9 @@ async function ensureInitialAdministrator() {
 async function start() {
   await prisma.$connect();
   await ensureInitialAdministrator();
+  if (config.NODE_ENV === "production" && (!config.SMTP_HOST || !config.SMTP_FROM)) {
+    console.warn("SMTP is not configured; email notifications are disabled.");
+  }
   httpServer = app.listen(config.PORT, config.HOST, () => {
     console.info(`TQMS API listening on port ${config.PORT}`);
   });

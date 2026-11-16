@@ -32,11 +32,11 @@ const configSchema = z.object({
       message: "CLIENT_ORIGIN must be set in production",
     });
   }
-  if (value.NODE_ENV === "production" && (!value.SMTP_HOST || !value.SMTP_FROM)) {
+  if (Boolean(value.SMTP_HOST) !== Boolean(value.SMTP_FROM)) {
     context.addIssue({
       code: "custom",
       path: ["SMTP_HOST"],
-      message: "SMTP_HOST and SMTP_FROM must be set in production",
+      message: "SMTP_HOST and SMTP_FROM must be configured together; leave both unset to disable email notifications",
     });
   }
   if (Boolean(value.SMTP_USER) !== Boolean(value.SMTP_PASSWORD)) {

@@ -30,7 +30,7 @@ The results workflow records whole-tender or item-wise awards with winner, quant
 
 Supplier registration payments support optional cheque-photo and receipt-copy attachments. Authorized Accounts, Costing, and Administrator users can add, download, replace, or remove each document from the registration payment history. PDF, JPEG, PNG, and WebP files up to 5 MB are stored privately in the database; documents are not required to record a payment. Tender and purchase-order attachments support the same file types up to 20 MB.
 
-Notifications are scoped to active recipients and cover tender closing dates, registration expiry, bid and performance bond expiry, supplier-price validity, pending quotation approvals, and overdue tender readings. Users can acknowledge or snooze alerts. Configure SMTP to send alert emails; production requires `SMTP_HOST` and `SMTP_FROM`.
+Notifications are scoped to active recipients and cover tender closing dates, registration expiry, bid and performance bond expiry, supplier-price validity, pending quotation approvals, and overdue tender readings. Users can acknowledge or snooze alerts. Configure SMTP to send alert emails. Without SMTP, in-app notifications continue to work, email delivery is disabled, and the production API logs a warning at startup.
 
 ## Phase 4 management reports
 
@@ -128,7 +128,7 @@ The API creates the first Administrator account from the environment variables a
    - `NODE_ENV=production`
    - `PORT`: API listen port (defaults to `4000`)
    - `HOST`: API bind address (defaults to `0.0.0.0`; set to `127.0.0.1` for a native install behind a same-server proxy)
-   - `SMTP_HOST` and `SMTP_FROM`: alert email server and sender; `SMTP_PORT` defaults to `587`, `SMTP_SECURE` defaults to `false`, and `SMTP_USER`/`SMTP_PASSWORD` must be supplied together when authentication is required
+   - `SMTP_HOST` and `SMTP_FROM`: optional alert email server and sender; configure both to enable email delivery. `SMTP_PORT` defaults to `587`, `SMTP_SECURE` defaults to `false`, and `SMTP_USER`/`SMTP_PASSWORD` must be supplied together when authentication is required
 
 3. Run `npm run start --workspace=api` under your server's process manager and put the API behind HTTPS. Permit inbound API traffic only as required by your hosting setup.
 
