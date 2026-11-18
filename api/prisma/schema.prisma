@@ -328,6 +328,7 @@ model RegistrationPaymentDocument {
 
 model Tender {
   id                    String      @id @default(uuid())
+  tenderNumber          Int         @unique @default(autoincrement())
   referenceNumber       String
   type                  TenderType
   status                TenderStatus @default(NEW)

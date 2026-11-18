@@ -21,6 +21,12 @@ import { baseRolePermissions, hasPermission, permissionCatalog } from "./permiss
 import { sriLankaAreas } from "./areas.js";
 import { colomboDayStart } from "./colombo-date.js";
 import { tenderAccessFilter } from "./tender-access.js";
+import {
+  areWonAwardQuantitiesOrdered,
+  canRecordAward,
+  hasCompleteAwardCoverage,
+  isPreSubmissionStatus,
+} from "./tender-workflow.js";
 
 const app = express();
 const supportedDocumentMimeTypes = ["application/pdf", "image/jpeg", "image/png", "image/webp"] as const;
@@ -1585,7 +1591,7 @@ app.get(
     const records = await prisma.tender.findMany({
       where: await tenderAccessWhere(request.user!),
       include: tenderInclude,
-      orderBy: [{ closingAt: "asc" }, { createdAt: "desc" }],
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     });
     response.json(await Promise.all(records.map(async (record) => ({
       ...(canViewPricingCosts(request.user!) ? record : redactTenderCosts(record)),
@@ -1814,6 +1820,61 @@ app.get(
         ? { ...company, minimumMarginPercent: null }
         : company,
     });
+  }),
+);
+
+app.patch(
+  "/api/tenders/:id/bid-bond",
+  requireAuth,
+  requireCsrf,
+  tenderEditorRoles,
+  route(async (request, response) => {
+    const tender = await findAccessibleTender(paramId(request), request.user!);
+    if (!tender) {
+      response.status(404).json({ error: "Tender not found" });
+      return;
+    }
+    if (!tender.bidBondRequired) {
+      response.status(400).json({ error: "Bid bond is not required for this tender" });
+      return;
+    }
+    const input = z.object({
+      bidBondStatus: z.enum(["REQUESTED", "ISSUED", "SUBMITTED", "RETURNED", "EXPIRED"]).optional(),
+      bidBondAmount: z.number().nonnegative().max(1_000_000_000).nullable().optional(),
+      bidBondBank: z.string().refine(isSriLankaBankCode, "Select a valid Sri Lankan bank.").nullable().optional(),
+      bidBondNumber: z.string().trim().max(100).nullable().optional(),
+      bidBondIssueDate: z.coerce.date().nullable().optional(),
+      bidBondExpiryDate: z.coerce.date().nullable().optional(),
+    }).strict().refine((value) => Object.values(value).some((field) => field !== undefined), {
+      message: "Provide at least one bid bond field to update",
+    }).refine((value) => !value.bidBondIssueDate || !value.bidBondExpiryDate || value.bidBondExpiryDate >= value.bidBondIssueDate, {
+      message: "Bond expiry date must be on or after the issue date",
+      path: ["bidBondExpiryDate"],
+    }).parse(request.body);
+    const updated = await prisma.$transaction(async (transaction) => {
+      const saved = await transaction.tender.update({
+        where: { id: tender.id },
+        data: input,
+        select: {
+          id: true,
+          bidBondAmount: true,
+          bidBondBank: true,
+          bidBondNumber: true,
+          bidBondIssueDate: true,
+          bidBondExpiryDate: true,
+          bidBondStatus: true,
+        },
+      });
+      await writeAudit(transaction, request.user?.id, "UPDATE", "Tender", tender.id, {
+        updatedFields: Object.keys(input),
+        ...(input.bidBondStatus ? {
+          fromStatus: tender.bidBondStatus ?? "REQUESTED",
+          toStatus: input.bidBondStatus,
+        } : {}),
+      });
+      return saved;
+    });
+    response.json(updated);
   }),
 );
 
@@ -2257,8 +2318,8 @@ app.post(
       response.status(404).json({ error: "Tender not found" });
       return;
     }
-    if (!["SUBMITTED", "TENDER_READING_DONE", "AWARDED", "LOST"].includes(tender.status)) {
-      response.status(400).json({ error: "Awards can only be recorded before purchase orders are received or the tender is closed" });
+    if (!canRecordAward(tender.status)) {
+      response.status(400).json({ error: "Awards can only be recorded before the tender is closed" });
       return;
     }
     const itemIds = tender.items.map((item) => item.id);
@@ -2334,9 +2395,11 @@ app.post(
         },
         include: { lines: { include: { tenderItem: true, winnerCompetitor: true } } },
       });
-      const status = previousLines.some((line) => line.wonByUs) || input.lines.some((line) => line.wonByUs)
-        ? "AWARDED"
-        : "LOST";
+      const status = tender.status === "PO_RECEIVED"
+        ? "PO_RECEIVED"
+        : previousLines.some((line) => line.wonByUs) || input.lines.some((line) => line.wonByUs)
+          ? "AWARDED"
+          : "LOST";
       await transaction.tender.update({ where: { id: tender.id }, data: { status } });
       await writeAudit(transaction, request.user?.id, "RECORD_AWARD", "TenderAward", created.id, { tenderId: tender.id, status });
       return created;
@@ -2604,7 +2667,31 @@ app.post(
       response.status(400).json({ error: "Only tenders with recorded purchase orders can be completed" });
       return;
     }
-    const orders = await prisma.purchaseOrder.findMany({ where: { tenderId: tender.id } });
+    const [orders, awardLines, purchaseOrderLines] = await Promise.all([
+      prisma.purchaseOrder.findMany({ where: { tenderId: tender.id } }),
+      prisma.tenderAwardLine.findMany({
+        where: { award: { tenderId: tender.id } },
+        select: { tenderItemId: true, quantity: true, wonByUs: true },
+      }),
+      prisma.purchaseOrderLine.findMany({
+        where: { purchaseOrder: { tenderId: tender.id } },
+        select: { tenderItemId: true, quantity: true },
+      }),
+    ]);
+    if (!hasCompleteAwardCoverage(
+      tender.items.map((item) => ({ id: item.id, quantity: Number(item.quantity) })),
+      awardLines.map((line) => ({ tenderItemId: line.tenderItemId, quantity: Number(line.quantity) })),
+    )) {
+      response.status(400).json({ error: "Record an award or loss for every requested item quantity before completing the tender" });
+      return;
+    }
+    if (!areWonAwardQuantitiesOrdered(
+      awardLines.map((line) => ({ ...line, quantity: Number(line.quantity), wonByUs: line.wonByUs })),
+      purchaseOrderLines.map((line) => ({ tenderItemId: line.tenderItemId, quantity: Number(line.quantity) })),
+    )) {
+      response.status(400).json({ error: "Record purchase orders for all quantities awarded to your company before completing the tender" });
+      return;
+    }
     if (!orders.length || orders.some((order) =>
       order.deliveryStatus !== "DELIVERED" || !order.paymentReceived ||
       order.performanceBondRequired && !["RETURNED", "EXPIRED"].includes(order.performanceBondStatus))) {
@@ -2661,8 +2748,8 @@ app.post(
       response.status(404).json({ error: "Tender not found" });
       return;
     }
-    if (tender.status === "CANCELLED" || tender.status === "COMPLETED") {
-      response.status(400).json({ error: "A quotation cannot be created for a cancelled or completed tender" });
+    if (!isPreSubmissionStatus(tender.status)) {
+      response.status(400).json({ error: "A quotation can only be created before tender submission" });
       return;
     }
     if (input.lines.length !== tender.items.length || new Set(input.lines.map((line) => line.tenderItemId)).size !== tender.items.length ||
@@ -2804,8 +2891,7 @@ app.post(
       response.status(404).json({ error: "Quotation not found" });
       return;
     }
-    if (quotation.status !== "DRAFT" || quotation.createdById === request.user?.id &&
-      !["ADMIN", "TENDER_MANAGER", "DIRECTOR"].includes(request.user.role)) {
+    if (quotation.status !== "DRAFT") {
       response.status(400).json({ error: "This quotation cannot be submitted by the current user" });
       return;
     }
@@ -2922,6 +3008,10 @@ app.post(
     const tender = await findAccessibleTender(paramId(request), request.user!);
     if (!tender) {
       response.status(404).json({ error: "Tender not found" });
+      return;
+    }
+    if (!isPreSubmissionStatus(tender.status)) {
+      response.status(400).json({ error: "Only a tender awaiting submission can be marked as submitted" });
       return;
     }
     const approved = await prisma.quotation.findFirst({ where: { tenderId: tender.id, status: "APPROVED" } });

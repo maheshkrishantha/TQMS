@@ -55,7 +55,9 @@ async function notifyUsers(
     await prisma.notification.upsert({
       where: {
         type_referenceId_leadDays_recipientId: {
-          ...notice,
+          type: notice.type,
+          referenceId: notice.referenceId,
+          leadDays: notice.leadDays,
           recipientId,
         },
       },

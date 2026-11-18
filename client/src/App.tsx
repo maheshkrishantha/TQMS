@@ -178,6 +178,7 @@ type Quotation = {
 };
 type TenderRecord = {
   id: string;
+  tenderNumber: number;
   referenceNumber: string;
   type: "OPEN" | "LETTERS" | "WALK_IN";
   status: string;
@@ -504,6 +505,226 @@ function isSupplierPriceCurrent(validUntil: string | null): boolean {
   return validThrough >= today;
 }
 
+function getTenderNextStep(tender: TenderRecord, results: TenderResults | null, currentUser: User): {
+  tone: "blue" | "red";
+  title: string;
+  message: string;
+} {
+  const preSubmission = ["NEW", "PRICE_REQUESTED", "QUOTED"].includes(tender.status);
+  const canPrepareQuotation = currentUser.permissions?.includes("quotations.prepare")
+    ?? ["ADMIN", "DIRECTOR", "TENDER_MANAGER", "SALES_REP"].includes(currentUser.role);
+  const canSubmitTender = currentUser.permissions?.includes("tenders.submit")
+    ?? ["ADMIN", "TENDER_MANAGER", "SALES_REP"].includes(currentUser.role);
+  const canManageSupplierPrices = currentUser.permissions?.includes("supplierPrices.manage")
+    ?? ["ADMIN", "DIRECTOR", "TENDER_MANAGER", "COSTING"].includes(currentUser.role);
+  const canManageReadings = currentUser.permissions?.includes("readings.manage")
+    ?? ["ADMIN", "DIRECTOR", "TENDER_MANAGER", "SALES_REP", "COSTING", "ACCOUNTS"].includes(currentUser.role);
+  const canManageAwards = currentUser.permissions?.includes("awards.manage")
+    ?? ["ADMIN", "DIRECTOR", "TENDER_MANAGER", "SALES_REP", "COSTING", "ACCOUNTS"].includes(currentUser.role);
+  const canManagePurchaseOrders = currentUser.permissions?.includes("purchaseOrders.manage")
+    ?? ["ADMIN", "DIRECTOR", "TENDER_MANAGER", "SALES_REP", "COSTING", "ACCOUNTS"].includes(currentUser.role);
+  const missingPrices = tender.items.filter((item) =>
+    !item.hasCurrentSupplierPrice && !item.supplierPrices.some((price) => isSupplierPriceCurrent(price.validUntil)));
+
+  if (preSubmission && missingPrices.length > 0) {
+    const itemNames = missingPrices.slice(0, 3).map((item) => item.description).join(", ");
+    const moreItems = missingPrices.length > 3 ? ` and ${missingPrices.length - 3} more` : "";
+    return {
+      tone: "red",
+      title: "Prices are needed before the quotation",
+      message: `${canManageSupplierPrices ? "Add current supplier prices" : "Ask a user with supplier-price access to add current prices"} for ${itemNames}${moreItems}. An expected bidder is only a tracking entry; it does not advance the tender.`,
+    };
+  }
+
+  if (preSubmission) {
+    const latest = tender.quotations[0];
+    if (!latest) {
+      return {
+        tone: canPrepareQuotation ? "blue" : "red",
+        title: "Next: prepare a quotation",
+        message: canPrepareQuotation
+          ? "Prepare a quotation for every tender item, then submit it for Tender Manager and Director approval."
+          : "Ask a user with quotation-preparation access to prepare and submit a quotation for approval.",
+      };
+    }
+    if (latest.status === "DRAFT") {
+      return {
+        tone: latest.createdById === currentUser.id && !canPrepareQuotation ? "red" : "blue",
+        title: "Next: submit the quotation for approval",
+        message: latest.createdById !== currentUser.id
+          ? `Quotation V${latest.version} is a draft. Ask its creator to submit it for approval.`
+          : canPrepareQuotation
+            ? `Submit quotation V${latest.version} for Tender Manager and Director approval.`
+            : "Your role cannot submit this quotation. Ask a user with quotation-preparation access to submit it.",
+      };
+    }
+    if (latest.status === "PENDING_TENDER_MANAGER") {
+      const needsDifferentApprover = latest.createdById === currentUser.id && currentUser.role === "TENDER_MANAGER";
+      return {
+        tone: "blue",
+        title: "Next: Tender Manager approval",
+        message: needsDifferentApprover
+          ? "This quotation needs approval from a different Tender Manager or an Admin."
+          : "The quotation is waiting for Tender Manager approval.",
+      };
+    }
+    if (latest.status === "PENDING_DIRECTOR") {
+      const needsDifferentApprover = latest.createdById === currentUser.id && currentUser.role === "DIRECTOR";
+      return {
+        tone: "blue",
+        title: "Next: Director approval",
+        message: needsDifferentApprover
+          ? "This quotation needs approval from a different Director or an Admin."
+          : "The quotation is waiting for Director approval.",
+      };
+    }
+    if (latest.status === "REJECTED") {
+      return {
+        tone: "red",
+        title: "The quotation was rejected",
+        message: `${latest.rejectionReason ? `${latest.rejectionReason} ` : ""}Prepare a revised quotation and submit it for approval.`,
+      };
+    }
+    return {
+      tone: canSubmitTender ? "blue" : "red",
+      title: "Next: submit the tender",
+      message: canSubmitTender
+        ? "After sending the approved bid to the institution, select “Mark tender as submitted” to continue to tender reading."
+        : "After sending the approved bid, ask a user with tender-submission access to mark it as submitted.",
+    };
+  }
+
+  if (tender.status === "SUBMITTED") {
+    return {
+      tone: "blue",
+      title: "Next: record the tender reading",
+      message: canManageReadings
+        ? "After the bid opening, record our bid and the competitors’ bids. Adding expected bidders alone does not move the tender to this step."
+        : "After the bid opening, ask a user with tender-reading access to record our bid and the competitors’ bids.",
+    };
+  }
+  if (tender.status === "TENDER_READING_DONE") {
+    return {
+      tone: "blue",
+      title: "Next: record award or loss outcomes",
+      message: canManageAwards
+        ? "Record the winner and quantity for each item. Use item-wise awards when results differ between items."
+        : "Ask a user with award-management access to record the winner and quantity for each item.",
+    };
+  }
+
+  const awardLines = results?.awards.flatMap((award) => award.lines) ?? [];
+  const quantities = tender.items.map((item) => {
+    const itemAwards = awardLines.filter((line) => line.tenderItemId === item.id);
+    const awarded = itemAwards.reduce((sum, line) => sum + Number(line.quantity), 0);
+    const wonByUs = itemAwards.filter((line) => line.wonByUs)
+      .reduce((sum, line) => sum + Number(line.quantity), 0);
+    const ordered = results?.purchaseOrders.flatMap((order) => order.lines)
+      .filter((line) => line.tenderItemId === item.id)
+      .reduce((sum, line) => sum + Number(line.quantity), 0) ?? 0;
+    return {
+      remainingAward: Math.max(0, Number(item.quantity) - awarded),
+      remainingPo: Math.max(0, wonByUs - ordered),
+    };
+  });
+  const hasRemainingAwards = quantities.some((quantity) => quantity.remainingAward > 1e-8);
+  const hasRemainingPurchaseOrders = quantities.some((quantity) => quantity.remainingPo > 1e-8);
+
+  if (tender.status === "AWARDED" || tender.status === "LOST") {
+    if (!results) {
+      return { tone: "blue", title: "Next: review tender results", message: "Tender results are loading. Reopen the tender if they do not appear." };
+    }
+    if (hasRemainingAwards) {
+      return {
+        tone: "red",
+        title: "Award outcomes are incomplete",
+        message: "Record an award or loss for the remaining requested quantities before moving to purchase orders.",
+      };
+    }
+    if (hasRemainingPurchaseOrders) {
+      return {
+        tone: "blue",
+        title: "Next: record the purchase order",
+        message: canManagePurchaseOrders
+          ? "Record purchase orders for the remaining quantities awarded to our company."
+          : "Ask a user with purchase-order access to record the quantities awarded to our company.",
+      };
+    }
+    return tender.status === "LOST"
+      ? { tone: "blue", title: "Tender recorded as lost", message: "No purchase order is expected for this result." }
+      : {
+        tone: "blue",
+        title: "Next: record the purchase order",
+        message: canManagePurchaseOrders
+          ? "When received, record the purchase order for the quantity awarded to our company."
+          : "When received, ask a user with purchase-order access to record the purchase order.",
+      };
+  }
+
+  if (tender.status === "PO_RECEIVED") {
+    if (!results) {
+      return { tone: "blue", title: "Next: review purchase orders", message: "Tender results are loading. Reopen the tender if they do not appear." };
+    }
+    if (hasRemainingAwards) {
+      return {
+        tone: "red",
+        title: "Award outcomes are incomplete",
+        message: "Record an award or loss for every remaining requested quantity before completing the tender.",
+      };
+    }
+    if (hasRemainingPurchaseOrders) {
+      return {
+        tone: "red",
+        title: "Purchase orders are incomplete",
+        message: canManagePurchaseOrders
+          ? "Record purchase orders for all quantities awarded to our company before completing the tender."
+          : "Ask a user with purchase-order access to record all quantities awarded to our company before completing.",
+      };
+    }
+    if (results.purchaseOrders.some((order) => order.deliveryStatus !== "DELIVERED")) {
+      return {
+        tone: "blue",
+        title: "Next: update delivery status",
+        message: canManagePurchaseOrders
+          ? "Update each purchase order to Delivered when its items arrive."
+          : "Ask a user with purchase-order access to update each order to Delivered when its items arrive.",
+      };
+    }
+    if (results.purchaseOrders.some((order) => !order.paymentReceived)) {
+      return {
+        tone: "blue",
+        title: "Next: record payment",
+        message: canManagePurchaseOrders
+          ? "Mark payment received on each purchase order after payment is confirmed."
+          : "Ask a user with purchase-order access to record payment after it is confirmed.",
+      };
+    }
+    if (results.purchaseOrders.some((order) =>
+      order.performanceBondRequired && !["RETURNED", "EXPIRED"].includes(order.performanceBondStatus))) {
+      return {
+        tone: "red",
+        title: "Performance bond action required",
+        message: canManagePurchaseOrders
+          ? "Update each required performance bond to Returned or Expired before completing."
+          : "Ask a user with purchase-order access to update each required bond to Returned or Expired before completing.",
+      };
+    }
+    const canComplete = ["ADMIN", "DIRECTOR", "TENDER_MANAGER"].includes(currentUser.role)
+      && (currentUser.permissions?.includes("tenders.complete") ?? true);
+    return canComplete
+      ? { tone: "blue", title: "Ready to complete", message: "All completion checks are satisfied. Select “Complete tender”." }
+      : { tone: "blue", title: "Ready for completion", message: "All completion checks are satisfied. Ask an Admin, Director, or Tender Manager to complete the tender." };
+  }
+
+  if (tender.status === "COMPLETED") {
+    return { tone: "blue", title: "Tender completed", message: "No further tender actions are required." };
+  }
+  if (tender.status === "CANCELLED") {
+    return { tone: "red", title: "Tender cancelled", message: "This tender is closed and cannot move to another step." };
+  }
+  return { tone: "blue", title: "Next step", message: "Review the tender status and contact a Tender Manager if you are unsure what to do next." };
+}
+
 function paginate<T>(rows: T[], requestedPage: number, pageSize: number) {
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
   const page = Math.min(requestedPage, totalPages);
@@ -514,6 +735,10 @@ function formatDate(value: string): string {
   return new Intl.DateTimeFormat("en-LK", { day: "numeric", month: "short", year: "numeric" }).format(
     new Date(value),
   );
+}
+
+function formatTenderNumber(value: number): string {
+  return `TD-${String(value).padStart(8, "0")}`;
 }
 
 function App() {
@@ -1496,7 +1721,7 @@ function App() {
   const filteredItems = items.filter((item) => `${item.code} ${item.name} ${item.category?.name ?? ""} ${item.brand?.name ?? ""}`.toLowerCase().includes(query.toLowerCase()));
   const filteredCompetitors = competitors.filter((competitor) => `${competitor.name} ${competitor.district ?? ""}`.toLowerCase().includes(query.toLowerCase()));
   const filteredSuppliers = suppliers.filter((supplier) => `${supplier.name} ${supplier.contactPerson ?? ""} ${supplier.contactNumber ?? ""} ${supplier.email ?? ""}`.toLowerCase().includes(query.toLowerCase()));
-  const filteredTenders = tenders.filter((tender) => `${tender.referenceNumber} ${tender.institution.name} ${tender.type} ${tender.status} ${tender.responsibleRep.fullName} ${tender.district ?? ""}`.toLowerCase().includes(query.toLowerCase()));
+  const filteredTenders = tenders.filter((tender) => `${formatTenderNumber(tender.tenderNumber)} ${tender.referenceNumber} ${tender.institution.name} ${tender.type} ${tender.status} ${tender.responsibleRep.fullName} ${tender.district ?? ""}`.toLowerCase().includes(query.toLowerCase()));
   const filteredInstitutions = institutions.filter((institution) => `${institution.name} ${institution.province ?? ""} ${institution.district ?? ""}`.toLowerCase().includes(query.toLowerCase()));
   const filteredRegistrations = registrations.filter((record) => `${record.institution.name} ${record.year} ${record.status}`.toLowerCase().includes(query.toLowerCase()));
   const filteredCategories = categories.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase()));
@@ -1601,7 +1826,7 @@ function App() {
               <div className="table-card"><TendersTable rows={tenderPage.rows} selectedId={selectedTender?.id} onSelect={(id) => void openTender(id)} /></div>
               <Pagination page={tenderPage.page} totalPages={tenderPage.totalPages} total={filteredTenders.length} pageSize={pageSize} onPageChange={setCurrentPage} onPageSizeChange={(size) => { setPageSize(size); setCurrentPage(1); }} />
               {selectedTender && <Modal
-                title={`Tender ${selectedTender.referenceNumber}`}
+                title={`Tender ${formatTenderNumber(selectedTender.tenderNumber)} · ${selectedTender.referenceNumber}`}
                 className="tender-details-modal"
                 onClose={() => { setSelectedTender(null); setTenderResults(null); }}
               >
@@ -2318,7 +2543,8 @@ function TenderCreateForm({ institutions, items, reps, areas, banks, currentUser
 }
 
 function TendersTable({ rows, selectedId, onSelect }: { rows: TenderRecord[]; selectedId?: string; onSelect: (id: string) => void }) {
-  return <table><thead><tr><th>REFERENCE / CUSTOMER</th><th>TYPE</th><th>CLOSING</th><th>REP</th><th>ITEMS</th><th>STATUS</th><th /></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className={selectedId === row.id ? "selected-tender-row" : ""}>
+  return <table><thead><tr><th>TENDER ID</th><th>REFERENCE / CUSTOMER</th><th>TYPE</th><th>CLOSING</th><th>REP</th><th>ITEMS</th><th>STATUS</th><th /></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className={selectedId === row.id ? "selected-tender-row" : ""}>
+    <td><strong>{formatTenderNumber(row.tenderNumber)}</strong></td>
     <td><div className="primary-cell"><span className="institution-avatar"><ClipboardList size={16} /></span><span><strong>{row.referenceNumber}</strong><small>{row.institution.name}{row.registrationWarning ? " · Registration warning" : ""}</small></span></div></td>
     <td>{row.type.replace("_", " ")}</td><td>{formatDate(row.closingAt)}<small className="sub-cell">{new Intl.DateTimeFormat("en-LK", { hour: "numeric", minute: "2-digit" }).format(new Date(row.closingAt))}</small></td>
     <td>{row.responsibleRep.fullName}</td><td>{row.items.length}</td><td><StatusBadge status={row.status} /></td>
@@ -2530,7 +2756,8 @@ function TenderResultsPanel({ tender, results, loading, banks, currentUser, onAc
     totalPrice: "",
     unitPrices: {},
   }]);
-  const canComplete = ["ADMIN", "DIRECTOR", "TENDER_MANAGER"].includes(currentUser.role);
+  const canComplete = ["ADMIN", "DIRECTOR", "TENDER_MANAGER"].includes(currentUser.role)
+    && (currentUser.permissions?.includes("tenders.complete") ?? true);
   if (!results) return <section className="results-panel"><p className="loading-line">{loading ? "Loading tender results…" : "Tender results could not be loaded. Select Open to try again."}</p></section>;
   const companyName = results.companyName;
 
@@ -2632,7 +2859,9 @@ function TenderResultsPanel({ tender, results, loading, banks, currentUser, onAc
 
   const orderedQuotations = tender.quotations.filter((quotation) => quotation.status === "APPROVED");
   const canAddReading = ["SUBMITTED", "TENDER_READING_DONE"].includes(tender.status);
-  const canEditExpectedBidders = !["CANCELLED", "COMPLETED"].includes(tender.status);
+  const canEditExpectedBidders = (currentUser.permissions?.includes("readings.manage")
+    ?? ["ADMIN", "DIRECTOR", "TENDER_MANAGER", "SALES_REP", "COSTING", "ACCOUNTS"].includes(currentUser.role))
+    && !["CANCELLED", "COMPLETED"].includes(tender.status);
   const awardedQuantity = (tenderItemId: string) => results.awards.flatMap((award) => award.lines)
     .filter((line) => line.tenderItemId === tenderItemId)
     .reduce((sum, line) => sum + Number(line.quantity), 0);
@@ -2651,8 +2880,10 @@ function TenderResultsPanel({ tender, results, loading, banks, currentUser, onAc
   };
   const canRecordOrder = ["AWARDED", "PO_RECEIVED"].includes(tender.status)
     && tender.items.some((item) => remainingPoQuantity(item.id) > 0);
-  const canRecordAward = ["SUBMITTED", "TENDER_READING_DONE", "AWARDED", "LOST"].includes(tender.status)
+  const canRecordAward = ["SUBMITTED", "TENDER_READING_DONE", "AWARDED", "LOST", "PO_RECEIVED"].includes(tender.status)
     && tender.items.some((item) => remainingAwardQuantity(item.id) > 0);
+  const canFinishTender = tender.items.every((item) =>
+    remainingAwardQuantity(item.id) <= 1e-8 && remainingPoQuantity(item.id) <= 1e-8);
   return <section className="results-panel">
     <div className="results-heading"><div><p className="eyebrow">TENDER RESULTS</p><h3>Readings, awards &amp; purchase orders</h3></div><StatusBadge status={tender.status} /></div>
 
@@ -2849,7 +3080,10 @@ function TenderResultsPanel({ tender, results, loading, banks, currentUser, onAc
     </form>}
 
     {results.purchaseOrders.length > 0 && <div className="results-subsection"><h4>Purchase orders &amp; performance bonds</h4>{results.purchaseOrders.map((order) => <PurchaseOrderCard key={order.id} order={order} banks={banks} onAction={onAction} canManageDocuments={currentUser.permissions?.includes("purchaseOrders.manage") ?? true} onUploadDocument={onUploadDocument} onDownloadDocument={onDownloadDocument} />)}</div>}
-    {canComplete && tender.status === "PO_RECEIVED" && <div className="form-actions"><button type="button" className="primary-button" onClick={onCompleteTender}>Complete tender</button></div>}
+    {canComplete && tender.status === "PO_RECEIVED" && <div className="form-actions">
+      {!canFinishTender && <p className="field-hint">Record award or loss outcomes for every requested quantity and purchase orders for all quantities won by your company before completing.</p>}
+      <button type="button" className="primary-button" onClick={onCompleteTender} disabled={!canFinishTender}>Complete tender</button>
+    </div>}
   </section>;
 }
 
@@ -2918,16 +3152,65 @@ function TenderDetailsPanel({ tender, results, resultsLoading, suppliers, banks,
 }) {
   const [addingSupplierPrice, setAddingSupplierPrice] = useState(false);
   const [priceRecommendations, setPriceRecommendations] = useState<Record<string, number>>({});
+  const [editingBidBondDetails, setEditingBidBondDetails] = useState(false);
+  const [savingBidBondDetails, setSavingBidBondDetails] = useState(false);
   const latest = tender.quotations[0];
-  const canApproveManager = currentUser.role === "ADMIN" || currentUser.role === "TENDER_MANAGER";
-  const canApproveDirector = currentUser.role === "ADMIN" || currentUser.role === "DIRECTOR";
+  const canPrepareQuotation = currentUser.permissions?.includes("quotations.prepare")
+    ?? ["ADMIN", "DIRECTOR", "TENDER_MANAGER", "SALES_REP"].includes(currentUser.role);
+  const canSubmitTender = currentUser.permissions?.includes("tenders.submit")
+    ?? ["ADMIN", "TENDER_MANAGER", "SALES_REP"].includes(currentUser.role);
+  const canApproveManager = currentUser.role === "ADMIN"
+    || currentUser.role === "TENDER_MANAGER" && (currentUser.permissions?.includes("quotations.approve") ?? true);
+  const canApproveDirector = currentUser.role === "ADMIN"
+    || currentUser.role === "DIRECTOR" && (currentUser.permissions?.includes("quotations.approve") ?? true);
   const canViewCosts = currentUser.permissions?.includes("pricingCosts.view") ?? ["ADMIN", "DIRECTOR", "TENDER_MANAGER", "COSTING"].includes(currentUser.role);
   const canAddSupplierPrice = currentUser.permissions?.includes("supplierPrices.manage") ?? ["ADMIN", "DIRECTOR", "TENDER_MANAGER", "COSTING"].includes(currentUser.role);
+  const canManageBidBond = currentUser.permissions?.includes("tenders.create") ?? ["ADMIN", "TENDER_MANAGER", "SALES_REP"].includes(currentUser.role);
   const canViewResults = currentUser.permissions?.includes("readings.view") ?? true;
+  const nextStep = getTenderNextStep(tender, results, currentUser);
   return <section className="tender-details-panel">
-    <div className="tender-details-heading"><div><p className="eyebrow">TENDER DETAILS</p><h2>{tender.referenceNumber} · {tender.institution.name}</h2><span>{tender.type.replace("_", " ")} · Closing {formatDate(tender.closingAt)} · Rep {tender.responsibleRep.fullName}</span></div><div className="tender-details-actions">{canAddSupplierPrice && <button type="button" className="primary-button" onClick={() => setAddingSupplierPrice(true)}>＋ Add supplier price</button>}<button type="button" className="icon-button" onClick={onClose} aria-label="Close tender details"><X size={18} /></button></div></div>
+    <div className="tender-details-heading"><div><p className="eyebrow">TENDER DETAILS</p><h2>{formatTenderNumber(tender.tenderNumber)} · {tender.referenceNumber} · {tender.institution.name}</h2><span>{tender.type.replace("_", " ")} · Closing {formatDate(tender.closingAt)} · Rep {tender.responsibleRep.fullName}</span></div><div className="tender-details-actions">{canAddSupplierPrice && <button type="button" className="primary-button" onClick={() => setAddingSupplierPrice(true)}>＋ Add supplier price</button>}<button type="button" className="icon-button" onClick={onClose} aria-label="Close tender details"><X size={18} /></button></div></div>
+    <div className={`tender-next-step tender-next-step-${nextStep.tone}`} role={nextStep.tone === "red" ? "alert" : "status"}>
+      <strong>{nextStep.title}</strong>
+      <p>{nextStep.message}</p>
+    </div>
     {tender.registrationWarning && <div className="feedback error-feedback">Supplier registration is not valid through this tender's closing date.</div>}
-    {tender.bidBondRequired && <div className="bond-summary"><strong>Bid bond</strong><span>{tender.bidBondAmount ? currency(tender.bidBondAmount) : "Amount not entered"}</span><span>{bankLabel(tender.bidBondBank, banks)}</span><span>{tender.bidBondNumber || "Bond number not entered"}</span><StatusBadge status={tender.bidBondStatus ?? "REQUESTED"} /></div>}
+    {tender.bidBondRequired && <>
+      <div className="bond-summary"><strong>Bid bond</strong><span>{tender.bidBondAmount ? currency(tender.bidBondAmount) : "Amount not entered"}</span><span>{bankLabel(tender.bidBondBank, banks)}</span><span>{tender.bidBondNumber || "Bond number not entered"}</span><StatusBadge status={tender.bidBondStatus ?? "REQUESTED"} />{canManageBidBond && <button type="button" className="secondary-button" onClick={() => setEditingBidBondDetails((editing) => !editing)}>{editingBidBondDetails ? "Cancel details edit" : "Edit bond details"}</button>}</div>
+      {editingBidBondDetails && canManageBidBond && <form className="form-grid bond-details-editor" onSubmit={async (event) => {
+        event.preventDefault();
+        const values = new FormData(event.currentTarget);
+        const amount = String(values.get("bidBondAmount") ?? "").trim();
+        setSavingBidBondDetails(true);
+        try {
+          const saved = await onResultAction(`/api/tenders/${tender.id}/bid-bond`, "PATCH", {
+            bidBondAmount: amount ? Number(amount) : null,
+            bidBondBank: values.get("bidBondBank") || null,
+            bidBondNumber: values.get("bidBondNumber") || null,
+            bidBondIssueDate: values.get("bidBondIssueDate") || null,
+            bidBondExpiryDate: values.get("bidBondExpiryDate") || null,
+            bidBondStatus: values.get("bidBondStatus"),
+          }, "Bid bond details and status updated.");
+          if (saved) setEditingBidBondDetails(false);
+        } finally {
+          setSavingBidBondDetails(false);
+        }
+      }}>
+        <label className="field"><span>Bond amount (LKR)</span><input name="bidBondAmount" type="number" min="0" step="0.01" defaultValue={tender.bidBondAmount ?? ""} /></label>
+        <label className="field"><span>Bond bank</span><select name="bidBondBank" defaultValue={tender.bidBondBank ?? ""}><option value="">Select bank</option>{banks.map((bank) => <option key={bank.code} value={bank.code}>{bank.name} · {bank.code}</option>)}</select></label>
+        <label className="field"><span>Bond number</span><input name="bidBondNumber" maxLength={100} defaultValue={tender.bidBondNumber ?? ""} /></label>
+        <label className="field"><span>Issue date</span><input name="bidBondIssueDate" type="date" defaultValue={tender.bidBondIssueDate?.slice(0, 10) ?? ""} /></label>
+        <label className="field"><span>Expiry date</span><input name="bidBondExpiryDate" type="date" defaultValue={tender.bidBondExpiryDate?.slice(0, 10) ?? ""} /></label>
+        <label className="field"><span>Bond status</span><select name="bidBondStatus" defaultValue={tender.bidBondStatus ?? "REQUESTED"}>
+          <option value="REQUESTED">Requested</option>
+          <option value="ISSUED">Issued</option>
+          <option value="SUBMITTED">Submitted</option>
+          <option value="RETURNED">Returned</option>
+          <option value="EXPIRED">Expired</option>
+        </select></label>
+        <div className="form-actions"><button type="button" className="secondary-button" onClick={() => setEditingBidBondDetails(false)} disabled={savingBidBondDetails}>Cancel</button><button type="submit" className="primary-button" disabled={savingBidBondDetails}>{savingBidBondDetails ? "Saving…" : "Save bond details"}<span>→</span></button></div>
+      </form>}
+    </>}
     <DocumentAttachments
       title="Tender documents & addenda"
       documents={tender.documents}
@@ -2975,17 +3258,17 @@ function TenderDetailsPanel({ tender, results, resultsLoading, suppliers, banks,
       <div className="quotation-total-row"><span>Subtotal {currency(quotation.subtotal)}</span><span>VAT {currency(quotation.vatAmount)}</span><strong>Total {currency(quotation.totalAmount)}</strong></div>
       {quotation.rejectionReason && <p className="rejection-reason">Rejected: {quotation.rejectionReason}</p>}
       <div className="quotation-actions">
-        {quotation.status === "DRAFT" && quotation.createdById === currentUser.id && <button className="secondary-button" onClick={() => onQuotationAction(quotation.id, "submit")}>Submit for approval</button>}
-        {quotation.status === "PENDING_TENDER_MANAGER" && canApproveManager && <><button className="secondary-button" onClick={() => onQuotationAction(quotation.id, "approve")}>Approve · Manager</button><button className="text-button" onClick={() => onQuotationAction(quotation.id, "reject")}>Reject</button></>}
-        {quotation.status === "PENDING_DIRECTOR" && canApproveDirector && <><button className="primary-button" onClick={() => onQuotationAction(quotation.id, "approve")}>Approve · Director</button><button className="text-button" onClick={() => onQuotationAction(quotation.id, "reject")}>Reject</button></>}
+        {quotation.status === "DRAFT" && quotation.createdById === currentUser.id && canPrepareQuotation && <button className="secondary-button" onClick={() => onQuotationAction(quotation.id, "submit")}>Submit for approval</button>}
+        {quotation.status === "PENDING_TENDER_MANAGER" && canApproveManager && <>{(currentUser.role === "ADMIN" || quotation.createdById !== currentUser.id) && <button className="secondary-button" onClick={() => onQuotationAction(quotation.id, "approve")}>Approve · Manager</button>}<button className="text-button" onClick={() => onQuotationAction(quotation.id, "reject")}>Reject</button></>}
+        {quotation.status === "PENDING_DIRECTOR" && canApproveDirector && <>{(currentUser.role === "ADMIN" || quotation.createdById !== currentUser.id) && <button className="primary-button" onClick={() => onQuotationAction(quotation.id, "approve")}>Approve · Director</button>}<button className="text-button" onClick={() => onQuotationAction(quotation.id, "reject")}>Reject</button></>}
         {quotation.status === "APPROVED" && <button className="secondary-button" onClick={() => window.print()}>Print customer quotation</button>}
       </div>
       {quotation.managerApprovedBy && <p className="approval-note">Manager approval: {quotation.managerApprovedBy.fullName}</p>}
       {quotation.directorApprovedBy && <p className="approval-note">Director approval: {quotation.directorApprovedBy.fullName}</p>}
     </article>)}
-    {latest?.status === "APPROVED" && tender.status !== "SUBMITTED" && tender.status !== "CANCELLED" && <div className="form-actions"><button className="primary-button" onClick={onSubmitTender}>Mark tender as submitted</button></div>}
-    {!["CANCELLED", "COMPLETED", "SUBMITTED"].includes(tender.status) && tender.items.every((item) => item.hasCurrentSupplierPrice || item.supplierPrices.some((price) => isSupplierPriceCurrent(price.validUntil))) && currentUser.permissions?.includes("quotations.prepare") && <QuotationBuilder key={`${tender.id}-${tender.quotations.length}`} tender={tender} canViewCosts={canViewCosts} onSave={onCreateQuotation} recommendedUnitPrices={priceRecommendations} />}
-    {!["CANCELLED", "COMPLETED", "SUBMITTED"].includes(tender.status) && tender.items.some((item) => !item.hasCurrentSupplierPrice && !item.supplierPrices.some((price) => isSupplierPriceCurrent(price.validUntil))) && <EmptyState icon={<FileText size={20} />} title="Supplier prices needed" message="A current supplier price is required before preparing a quotation." />}
+    {latest?.status === "APPROVED" && ["NEW", "PRICE_REQUESTED", "QUOTED"].includes(tender.status) && canSubmitTender && <div className="form-actions"><button className="primary-button" onClick={onSubmitTender}>Mark tender as submitted</button></div>}
+    {["NEW", "PRICE_REQUESTED", "QUOTED"].includes(tender.status) && tender.items.every((item) => item.hasCurrentSupplierPrice || item.supplierPrices.some((price) => isSupplierPriceCurrent(price.validUntil))) && currentUser.permissions?.includes("quotations.prepare") && <QuotationBuilder key={`${tender.id}-${tender.quotations.length}`} tender={tender} canViewCosts={canViewCosts} onSave={onCreateQuotation} recommendedUnitPrices={priceRecommendations} />}
+    {["NEW", "PRICE_REQUESTED", "QUOTED"].includes(tender.status) && tender.items.some((item) => !item.hasCurrentSupplierPrice && !item.supplierPrices.some((price) => isSupplierPriceCurrent(price.validUntil))) && <EmptyState icon={<FileText size={20} />} title="Supplier prices needed" message="A current supplier price is required before preparing a quotation." />}
     <div className="quote-print-document">
       {latest?.status === "APPROVED" && <QuotationPrint tender={tender} quotation={latest} />}
     </div>
