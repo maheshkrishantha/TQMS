@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   Activity,
   Archive,
@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import "./App.css";
 import { createXlsxWorkbook } from "./xlsxExport";
-import { readXlsxRows } from "./xlsxImport";
+import { MAX_ITEM_IMPORT_ROWS, readXlsxRows } from "./xlsxImport";
 
 type Role = "ADMIN" | "DIRECTOR" | "TENDER_MANAGER" | "SALES_REP" | "COSTING" | "ACCOUNTS";
 type User = {
@@ -416,6 +416,10 @@ async function request<T>(
     throw new Error(message);
   }
   return body as T;
+}
+
+async function searchItemOptions(query: string): Promise<Item[]> {
+  return request<Item[]>(`/api/items/search?q=${encodeURIComponent(query)}&limit=50`);
 }
 
 async function uploadPaymentDocument(
@@ -856,23 +860,23 @@ function App() {
           break;
         }
         case "registrations": {
-          const [registrationList, institutionList, itemList, areaList] = await Promise.all([
+          const canManagePayments = user.permissions?.includes("registrationPayments.manage") ?? false;
+          const [registrationList, institutionList, areaList, bankList] = await Promise.all([
             request<Registration[]>("/api/registrations"),
             request<Institution[]>("/api/institutions"),
-            request<Item[]>("/api/items"),
             request<Area[]>("/api/areas"),
+            canManagePayments ? request<SriLankaBank[]>("/api/banks") : Promise.resolve<SriLankaBank[]>([]),
           ]);
           setRegistrations(registrationList);
           setInstitutions(institutionList);
-          setItems(itemList);
           setAreas(areaList);
+          setBanks(bankList);
           break;
         }
         case "tenders": {
-          const [tenderList, institutionList, itemList, areaList, repList, supplierList, bankList] = await Promise.all([
+          const [tenderList, institutionList, areaList, repList, supplierList, bankList] = await Promise.all([
             request<TenderRecord[]>("/api/tenders"),
             request<Institution[]>("/api/institutions"),
-            request<Item[]>("/api/items"),
             request<Area[]>("/api/areas"),
             request<{ id: string; fullName: string; email: string; role: Role }[]>("/api/tender-reps"),
             request<Supplier[]>("/api/tender-suppliers"),
@@ -880,7 +884,6 @@ function App() {
           ]);
           setTenders(tenderList);
           setTenderInstitutions(institutionList);
-          setItems(itemList);
           setAreas(areaList);
           setTenderReps(repList);
           setTenderSuppliers(supplierList);
@@ -1106,8 +1109,6 @@ function App() {
       }
 
       const valueAt = (cells: string[], column: number) => column < 0 ? "" : (cells[column] ?? "").trim();
-      const categoryByName = new Map(categories.filter(({ active }) => active).map((entry) => [normalize(entry.name), entry.id]));
-      const brandByName = new Map(brands.filter(({ active }) => active).map((entry) => [normalize(entry.name), entry.id]));
       const activeUnits = units.filter(({ active }) => active);
       const importedCodes = new Set<string>();
       const importedItems = rows.slice(headerIndex + 1)
@@ -1127,10 +1128,6 @@ function App() {
           }
           importedCodes.add(normalizedCode);
 
-          const categoryId = category ? categoryByName.get(normalize(category)) : null;
-          if (category && !categoryId) throw new Error(`Excel row ${rowNumber} refers to unknown or inactive category "${category}".`);
-          const brandId = brand ? brandByName.get(normalize(brand)) : null;
-          if (brand && !brandId) throw new Error(`Excel row ${rowNumber} refers to unknown or inactive brand "${brand}".`);
           const selectedUnit = activeUnits.find((entry) => normalize(entry.name) === normalize(unit))
             ?? activeUnits.find((entry) => normalize(entry.abbreviation) === normalize(unit));
           if (!selectedUnit) throw new Error(`Excel row ${rowNumber} refers to unknown or inactive unit "${unit}".`);
@@ -1150,8 +1147,8 @@ function App() {
           return {
             code,
             name,
-            categoryId,
-            brandId,
+            categoryName: category || null,
+            brandName: brand || null,
             modelSpecification: valueAt(cells, columns.model) || null,
             unitId: selectedUnit.id,
             warrantyMonths,
@@ -1160,16 +1157,31 @@ function App() {
         });
 
       if (importedItems.length === 0) throw new Error("The Excel file contains no item rows to import.");
-      if (importedItems.length > 500) throw new Error("Import a maximum of 500 item rows at a time.");
-      if (!window.confirm(`Import ${importedItems.length} item(s)? Existing item codes will not be overwritten.`)) return;
+      if (importedItems.length > MAX_ITEM_IMPORT_ROWS) {
+        throw new Error(`Import a maximum of ${MAX_ITEM_IMPORT_ROWS} item rows at a time.`);
+      }
+      if (!window.confirm(
+        `Import ${importedItems.length} item(s)? Missing categories will be created, matching inactive categories and brands reactivated, and blank or unmatched brands assigned to Other. Existing item codes will not be overwritten.`,
+      )) return;
 
-      const result = await request<{ imported: number }>("/api/items/import", {
+      const result = await request<{
+        imported: number;
+        categoriesCreated: number;
+        categoriesReactivated: number;
+        brandsReactivated: number;
+        brandsAssignedToOther: number;
+      }>("/api/items/import", {
         method: "POST",
         body: JSON.stringify(importedItems),
       }, csrfToken);
       await loadPage("items");
       setCurrentPage(1);
-      setSuccess(`Imported ${result.imported} item(s).`);
+      const details = [`Imported ${result.imported} item(s).`];
+      if (result.categoriesCreated) details.push(`Created ${result.categoriesCreated} categor${result.categoriesCreated === 1 ? "y" : "ies"}.`);
+      const reactivatedMasters = result.categoriesReactivated + result.brandsReactivated;
+      if (reactivatedMasters) details.push(`Reactivated ${reactivatedMasters} category/brand master record(s).`);
+      if (result.brandsAssignedToOther) details.push(`Assigned ${result.brandsAssignedToOther} item(s) to Other brand.`);
+      setSuccess(details.join(" "));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to import items from this Excel file.");
     }
@@ -1822,7 +1834,7 @@ function App() {
               onQuery={updateQuery}
               action={can("tenders.create") && <button className="primary-button" onClick={() => setTenderCreateOpen((open) => !open)}>＋ New tender</button>}
             >
-              {tenderCreateOpen && <Modal title="Create tender" onClose={() => setTenderCreateOpen(false)}><TenderCreateForm institutions={tenderInstitutions} items={items.filter((item) => item.active)} reps={tenderReps} areas={areas} banks={banks} currentUser={user} onSubmit={(payload) => void createTender(payload)} onCancel={() => setTenderCreateOpen(false)} /></Modal>}
+              {tenderCreateOpen && <Modal title="Create tender" className="entry-modal" onClose={() => setTenderCreateOpen(false)}><TenderCreateForm institutions={tenderInstitutions} reps={tenderReps} areas={areas} banks={banks} currentUser={user} onSubmit={(payload) => void createTender(payload)} onCancel={() => setTenderCreateOpen(false)} /></Modal>}
               <div className="table-card"><TendersTable rows={tenderPage.rows} selectedId={selectedTender?.id} onSelect={(id) => void openTender(id)} /></div>
               <Pagination page={tenderPage.page} totalPages={tenderPage.totalPages} total={filteredTenders.length} pageSize={pageSize} onPageChange={setCurrentPage} onPageSizeChange={(size) => { setPageSize(size); setCurrentPage(1); }} />
               {selectedTender && <Modal
@@ -1976,7 +1988,7 @@ function App() {
                   <Field label="Amount (LKR)" name="amount" type="number" required defaultValue={0} />
                   <Field label="Payment date" name="paymentDate" type="date" required defaultValue={todayInput} />
                   <Field label="Receipt / reference no." name="reference" />
-                  <Field label="Bank" name="bank" />
+                  <label className="field"><span>Bank</span><select name="bank" defaultValue=""><option value="">Select bank</option>{banks.map((bank) => <option key={bank.code} value={bank.code}>{bank.name} · {bank.code}</option>)}</select></label>
                   <Field label="Paid by" name="paidBy" />
                 </div>
                 <div className="form-grid payment-document-inputs">
@@ -2010,7 +2022,7 @@ function App() {
                 </div>
                 <FormActions onCancel={() => setRenewing(null)} label="Record renewal" />
               </form></Modal>}
-              {newRegistrationOpen && <Modal title="Record a supplier registration" onClose={() => setNewRegistrationOpen(false)}><form className="editor-card modal-form" onSubmit={(event) => void submitForm(event)}>
+              {newRegistrationOpen && <Modal title="Record a supplier registration" className="entry-modal" onClose={() => setNewRegistrationOpen(false)}><form className="editor-card modal-form" onSubmit={(event) => void submitForm(event)}>
                 <div className="editor-heading"><div><h2>Record a supplier registration</h2><p>Select an institution and the items covered by this registration.</p></div><button type="button" className="icon-button" onClick={() => setNewRegistrationOpen(false)} aria-label="Close form"><X size={18} /></button></div>
                 <div className="form-grid">
                   <label className="field"><span>Institution <i>*</i></span><select name="institutionId" required defaultValue=""><option value="" disabled>Select institution</option>{institutions.map((institution) => <option key={institution.id} value={institution.id}>{institution.name}</option>)}</select></label>
@@ -2019,7 +2031,7 @@ function App() {
                   <Field label="Bond amount (LKR)" name="bondAmount" type="number" required defaultValue={0} />
                   <Field label="Registration date" name="registrationDate" type="date" required defaultValue={todayInput} />
                   <Field label="Expiry date" name="expiryDate" type="date" required defaultValue={expiryInput} />
-                  <label className="field field-wide"><span>Registered items</span><select name="itemIds" multiple size={4}>{items.filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.code}</option>)}</select><small className="field-hint">Hold Ctrl (Windows) or Command (Mac) to select multiple items.</small></label>
+                  <div className="field field-wide"><span>Registered items</span><RegistrationItemPicker /></div>
                 </div>
                 <FormActions onCancel={() => setNewRegistrationOpen(false)} label="Save registration" />
               </form></Modal>}
@@ -2456,9 +2468,8 @@ type TenderLineDraft = {
   estimatedUnitPrice: string;
 };
 
-function TenderCreateForm({ institutions, items, reps, areas, banks, currentUser, onSubmit, onCancel }: {
+function TenderCreateForm({ institutions, reps, areas, banks, currentUser, onSubmit, onCancel }: {
   institutions: Institution[];
-  items: Item[];
   reps: { id: string; fullName: string; email: string; role: Role }[];
   areas: Area[];
   banks: SriLankaBank[];
@@ -2499,7 +2510,7 @@ function TenderCreateForm({ institutions, items, reps, areas, banks, currentUser
         description: line.description,
         specification: line.specification || null,
         quantity: Number(line.quantity),
-        unit: line.unit || (items.find((item) => item.id === line.itemId)?.unit.name ?? "Each"),
+        unit: line.unit || "Each",
         estimatedUnitPrice: line.estimatedUnitPrice ? Number(line.estimatedUnitPrice) : null,
       })),
     });
@@ -2527,10 +2538,9 @@ function TenderCreateForm({ institutions, items, reps, areas, banks, currentUser
     </div>
     <div className="tender-lines-heading"><h3>Requested items</h3><button type="button" className="secondary-button" onClick={() => setLines((current) => [...current, { itemId: "", description: "", specification: "", quantity: "1", unit: "", estimatedUnitPrice: "" }])}>＋ Add line</button></div>
     <div className="tender-draft-lines">{lines.map((line, index) => <div className="tender-draft-line" key={index}>
-      <label className="field"><span>Item master (or choose custom)</span><select value={line.itemId} onChange={(event) => {
-        const selected = items.find((item) => item.id === event.target.value);
-        updateLine(index, { itemId: event.target.value, description: selected?.name ?? "", unit: selected?.unit.name ?? "" });
-      }}><option value="">Custom tender item</option>{items.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.code}</option>)}</select></label>
+      <label className="field"><span>Item master (search or choose custom)</span><TenderItemPicker value={line.itemId} onSelect={(selected) => {
+        updateLine(index, { itemId: selected?.id ?? "", description: selected?.name ?? "", unit: selected?.unit.name ?? "" });
+      }} /></label>
       <label className="field"><span>Description <i>*</i></span><input required maxLength={200} value={line.description} onChange={(event) => updateLine(index, { description: event.target.value })} /></label>
       <label className="field"><span>Specification</span><input maxLength={1000} value={line.specification} onChange={(event) => updateLine(index, { specification: event.target.value })} /></label>
       <label className="field"><span>Quantity <i>*</i></span><input type="number" min="0.001" step="0.001" required value={line.quantity} onChange={(event) => updateLine(index, { quantity: event.target.value })} /></label>
@@ -2540,6 +2550,236 @@ function TenderCreateForm({ institutions, items, reps, areas, banks, currentUser
     </div>)}</div>
     <FormActions onCancel={onCancel} label="Save tender" />
   </form>;
+}
+
+function TenderItemPicker({ value, onSelect }: {
+  value: string;
+  onSelect: (item: Item | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [selectedItem, setSelectedItem] = useState<Item | null>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const { items, loading, error, setLoading } = useItemSearch(open, query);
+
+  useEffect(() => {
+    if (!open) return;
+    function closeOnOutsideClick(event: PointerEvent) {
+      if (!pickerRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+        setQuery("");
+        setLoading(false);
+      }
+    }
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
+  }, [open, setLoading]);
+
+  function chooseItem(item: Item | null) {
+    setSelectedItem(item);
+    onSelect(item);
+    setQuery("");
+    setOpen(false);
+    setLoading(false);
+  }
+
+  function toggleMenu() {
+    setOpen((current) => !current);
+    setQuery("");
+    setLoading(!open);
+  }
+
+  return <div className="tender-item-picker" ref={pickerRef}>
+    <button
+      type="button"
+      className="tender-item-picker-trigger"
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      onClick={toggleMenu}
+    >
+      <span>{selectedItem ? `${selectedItem.name} · ${selectedItem.code}` : "Choose an item or custom description"}</span>
+      <ChevronDown size={16} />
+    </button>
+    {open && <div className="tender-item-picker-menu">
+      <label className="tender-item-picker-search">
+        <Search size={15} />
+        <input
+          type="search"
+          role="combobox"
+          aria-label="Search tender items"
+          aria-autocomplete="list"
+          aria-expanded={open}
+          autoFocus
+          placeholder="Search by item name or code"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setLoading(true);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              setOpen(false);
+              setQuery("");
+              setLoading(false);
+            }
+          }}
+        />
+      </label>
+      <div className="tender-item-picker-options" role="listbox" aria-label="Tender items">
+        <button type="button" role="option" aria-selected={!value} onClick={() => chooseItem(null)}>
+          Custom tender item
+        </button>
+        {loading && <p>Searching items…</p>}
+        {!loading && error && <p>{error}</p>}
+        {!loading && !error && items.map((item) => <button
+          type="button"
+          role="option"
+          aria-selected={item.id === value}
+          key={item.id}
+          onClick={() => chooseItem(item)}
+        >
+          <strong>{item.name}</strong>
+          <small>{item.code}{item.category?.name ? ` · ${item.category.name}` : ""}</small>
+        </button>)}
+        {!loading && !error && items.length === 0 && <p>{query ? "No matching items." : "No active items available."}</p>}
+      </div>
+    </div>}
+  </div>;
+}
+
+function useItemSearch(open: boolean, query: string) {
+  const [items, setItems] = useState<Item[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void searchItemOptions(query)
+        .then((results) => {
+          if (!cancelled) {
+            setItems(results);
+            setError("");
+          }
+        })
+        .catch((reason) => {
+          if (!cancelled) {
+            setItems([]);
+            setError(reason instanceof Error ? reason.message : "Unable to search items.");
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, query]);
+
+  return { items, loading, error, setLoading };
+}
+
+function RegistrationItemPicker() {
+  const [selectedItems, setSelectedItems] = useState<Item[]>([]);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const { items, loading, error, setLoading } = useItemSearch(open, query);
+  const selectedIds = new Set(selectedItems.map((item) => item.id));
+  const availableItems = items.filter((item) => !selectedIds.has(item.id));
+
+  useEffect(() => {
+    if (!open) return;
+    function closeOnOutsideClick(event: PointerEvent) {
+      if (!pickerRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+        setQuery("");
+        setLoading(false);
+      }
+    }
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
+  }, [open, setLoading]);
+
+  function addItem(item: Item) {
+    setSelectedItems((current) => [...current, item]);
+    setQuery("");
+    setLoading(true);
+  }
+
+  function toggleMenu() {
+    setOpen((current) => !current);
+    setQuery("");
+    setLoading(!open);
+  }
+
+  return <div className="registration-item-selector">
+    <div className="registration-item-picker" ref={pickerRef}>
+      <button
+        type="button"
+        className="registration-item-picker-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={toggleMenu}
+      >
+        <span>{selectedItems.length ? `Add another item · ${selectedItems.length} selected` : "Search and add items"}</span>
+        <ChevronDown size={16} />
+      </button>
+      {open && <div className="registration-item-picker-menu">
+        <label className="registration-item-picker-search">
+          <Search size={15} />
+          <input
+            type="search"
+            role="combobox"
+            aria-label="Search registered items"
+            aria-autocomplete="list"
+            aria-expanded={open}
+            autoFocus
+            placeholder="Search by item name or code"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setLoading(true);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setOpen(false);
+                setQuery("");
+                setLoading(false);
+              }
+            }}
+          />
+        </label>
+        <div className="registration-item-picker-options" role="listbox" aria-label="Available items" aria-multiselectable="true">
+          {loading && <p>Searching items…</p>}
+          {!loading && error && <p>{error}</p>}
+          {!loading && !error && availableItems.map((item) => <button
+            type="button"
+            role="option"
+            aria-selected="false"
+            key={item.id}
+            onClick={() => addItem(item)}
+          >
+            <strong>{item.name}</strong>
+            <small>{item.code}{item.category?.name ? ` · ${item.category.name}` : ""}</small>
+          </button>)}
+          {!loading && !error && availableItems.length === 0 && <p>{items.length ? "All matching items are already selected." : query ? "No matching items." : "No active items available."}</p>}
+        </div>
+      </div>}
+    </div>
+    {selectedItems.length
+      ? <ul className="registration-selected-items">
+        {selectedItems.map((item) => <li key={item.id}>
+          <span><strong>{item.name}</strong><small>{item.code}</small></span>
+          <button type="button" className="text-button" aria-label={`Remove ${item.name}`} onClick={() => setSelectedItems((current) => current.filter(({ id }) => id !== item.id))}>Remove</button>
+          <input type="hidden" name="itemIds" value={item.id} />
+        </li>)}
+      </ul>
+      : <small className="field-hint">No items selected.</small>}
+  </div>;
 }
 
 function TendersTable({ rows, selectedId, onSelect }: { rows: TenderRecord[]; selectedId?: string; onSelect: (id: string) => void }) {
@@ -3405,7 +3645,18 @@ function MasterOptions({ title, kind, values, canCreate, canManage, onAdd, onUpd
 }
 
 function ItemsTable({ rows, canManage, onEdit, onDeactivate }: { rows: Item[]; canManage: boolean; onEdit: (row: Item) => void; onDeactivate: (row: Item) => void }) {
-  return <table><thead><tr><th>ITEM</th><th>CATEGORY</th><th>BRAND / MODEL</th><th>WARRANTY</th><th>STATUS</th>{canManage && <th />}</tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><div className="primary-cell"><span className="item-avatar"><Package size={16} /></span><span><strong>{row.name}</strong><small>{row.code} · {row.unit.name}</small></span></div></td><td>{row.category?.name || "—"}</td><td>{[row.brand?.name, row.modelSpecification].filter(Boolean).join(" / ") || "—"}</td><td>{row.warrantyMonths ? `${row.warrantyMonths} months` : "—"}</td><td><StatusBadge status={row.active ? "ACTIVE" : "INACTIVE"} /></td>{canManage && <td><RowActions onEdit={() => onEdit(row)} onDeactivate={row.active ? () => onDeactivate(row) : undefined} /></td>}</tr>)}</tbody></table>;
+  return <table>
+    <thead><tr><th>ITEM CODE</th><th>ITEM</th><th>CATEGORY</th><th>BRAND / MODEL</th><th>WARRANTY</th><th>STATUS</th>{canManage && <th />}</tr></thead>
+    <tbody>{rows.map((row) => <tr key={row.id}>
+      <td><strong>{row.code}</strong></td>
+      <td><div className="primary-cell"><span className="item-avatar"><Package size={16} /></span><span><strong>{row.name}</strong><small>{row.unit.name}</small></span></div></td>
+      <td>{row.category?.name || "—"}</td>
+      <td>{[row.brand?.name, row.modelSpecification].filter(Boolean).join(" / ") || "—"}</td>
+      <td>{row.warrantyMonths ? `${row.warrantyMonths} months` : "—"}</td>
+      <td><StatusBadge status={row.active ? "ACTIVE" : "INACTIVE"} /></td>
+      {canManage && <td><RowActions onEdit={() => onEdit(row)} onDeactivate={row.active ? () => onDeactivate(row) : undefined} /></td>}
+    </tr>)}</tbody>
+  </table>;
 }
 
 function CompetitorTable({ rows, canManage, onEdit, onDeactivate }: { rows: Competitor[]; canManage: boolean; onEdit: (row: Competitor) => void; onDeactivate: (row: Competitor) => void }) {

@@ -58,14 +58,15 @@ export const baseRolePermissions: Record<Role, string[]> = Object.fromEntries(
   allRoles.map((role) => [role, permissionCatalog.filter((permission) => permission.roles.includes(role)).map(({ id }) => id)]),
 ) as Record<Role, string[]>;
 
-const routePermissions: { method: string; path: RegExp; permission: string }[] = [
+const routePermissions: { method: string; path: RegExp; permission: string | string[] }[] = [
   { method: "GET", path: /^\/api\/dashboard$/, permission: "dashboard.view" },
   { method: "GET", path: /^\/api\/reports\/(?:tenders|prediction-accuracy)$/, permission: "reports.view" },
   { method: "GET", path: /^\/api\/areas$/, permission: "lookups.view" },
-  { method: "GET", path: /^\/api\/banks$/, permission: "tenders.view" },
+  { method: "GET", path: /^\/api\/banks$/, permission: ["tenders.view", "registrationPayments.manage"] },
   { method: "GET", path: /^\/api\/company$/, permission: "company.view" },
   { method: "PUT", path: /^\/api\/company$/, permission: "company.edit" },
   { method: "GET", path: /^\/api\/(?:items|item-categories|brands|units)$/, permission: "items.view" },
+  { method: "GET", path: /^\/api\/items\/search$/, permission: "items.view" },
   { method: "POST", path: /^\/api\/items\/import$/, permission: "items.manage" },
   { method: "POST", path: /^\/api\/(?:items|item-categories|brands|units)$/, permission: "items.create" },
   { method: "PUT", path: /^\/api\/(?:items|item-categories|brands|units)\/[^/]+$/, permission: "items.manage" },
@@ -121,7 +122,7 @@ const routePermissions: { method: string; path: RegExp; permission: string }[] =
   { method: "GET", path: /^\/api\/audit-logs$/, permission: "auditLogs.view" },
 ];
 
-export function permissionForRoute(method: string, routePath: string): string | undefined {
+export function permissionForRoute(method: string, routePath: string): string | string[] | undefined {
   return routePermissions.find((entry) => entry.method === method && entry.path.test(routePath))?.permission;
 }
 

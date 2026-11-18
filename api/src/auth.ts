@@ -114,8 +114,11 @@ export async function requireAuth(
     const permission = request.path.startsWith("/api/auth/")
       ? undefined
       : permissionForRoute(request.method, routePath);
+    const hasRoutePermission = Array.isArray(permission)
+      ? permission.some((requiredPermission) => hasPermission(authUser.role, permissions, requiredPermission))
+      : permission && hasPermission(authUser.role, permissions, permission);
     if (
-      permission && !hasPermission(authUser.role, permissions, permission) ||
+      permission && !hasRoutePermission ||
       !permission && !request.path.startsWith("/api/auth/")
     ) {
       response.status(403).json({ error: "Your role does not have permission to perform this action" });

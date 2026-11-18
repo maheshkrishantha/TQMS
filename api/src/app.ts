@@ -27,8 +27,16 @@ import {
   hasCompleteAwardCoverage,
   isPreSubmissionStatus,
 } from "./tender-workflow.js";
+import {
+  buildMasterNameLookup,
+  itemImportSchema,
+  itemSchema,
+  normalizeMasterName,
+} from "./item-schema.js";
 
 const app = express();
+const defaultJsonParser = express.json({ limit: "1mb" });
+const itemImportJsonParser = express.json({ limit: "10mb" });
 const supportedDocumentMimeTypes = ["application/pdf", "image/jpeg", "image/png", "image/webp"] as const;
 const businessDocumentUpload = express.raw({ type: [...supportedDocumentMimeTypes], limit: "20mb" });
 const adminOnly: express.RequestHandler = (request, response, next) => {
@@ -62,7 +70,12 @@ app.use(cors({
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   allowedHeaders: ["Content-Type", "X-CSRF-Token"],
 }));
-app.use(express.json({ limit: "1mb" }));
+app.use((request, response, next) => {
+  const parser = request.method === "POST" && request.path === "/api/items/import"
+    ? itemImportJsonParser
+    : defaultJsonParser;
+  parser(request, response, next);
+});
 app.use(cookieParser());
 
 const loginLimiter = rateLimit({
@@ -1053,24 +1066,13 @@ app.put(
   }),
 );
 
-const itemSchema = z.object({
-  code: z.string().trim().min(1).max(50),
-  name: z.string().trim().min(1).max(200),
-  categoryId: z.string().min(1).max(100).optional().nullable(),
-  brandId: z.string().min(1).max(100).optional().nullable(),
-  modelSpecification: z.string().trim().max(1000).optional().nullable(),
-  unitId: z.string().min(1).max(100),
-  warrantyMonths: z.number().int().min(0).max(600).optional().nullable(),
-  active: z.boolean().optional(),
-});
-
 app.post(
   "/api/items/import",
   requireAuth,
   requireCsrf,
   itemEditorRoles,
   route(async (request, response) => {
-    const items = z.array(itemSchema).min(1).max(500).parse(request.body);
+    const items = itemImportSchema.parse(request.body);
     const codes = items.map(({ code }) => code.toLowerCase());
     if (new Set(codes).size !== codes.length) {
       throw new RequestValidationError("The Excel file contains duplicate item codes.");
@@ -1087,24 +1089,112 @@ app.post(
       return;
     }
 
-    const categoryIds = [...new Set(items.flatMap(({ categoryId }) => categoryId ? [categoryId] : []))];
-    const brandIds = [...new Set(items.flatMap(({ brandId }) => brandId ? [brandId] : []))];
     const unitIds = [...new Set(items.map(({ unitId }) => unitId))];
-    await prisma.$transaction(async (transaction) => {
-      const [categories, brands, units] = await Promise.all([
-        categoryIds.length
-          ? transaction.itemCategory.findMany({ where: { id: { in: categoryIds }, active: true }, select: { id: true } })
-          : [],
-        brandIds.length
-          ? transaction.brand.findMany({ where: { id: { in: brandIds }, active: true }, select: { id: true } })
-          : [],
+    const importSummary = await prisma.$transaction(async (transaction) => {
+      const [categoryRecords, brandRecords, units] = await Promise.all([
+        transaction.itemCategory.findMany({ select: { id: true, name: true, active: true } }),
+        transaction.brand.findMany({ select: { id: true, name: true, active: true } }),
         transaction.unit.findMany({ where: { id: { in: unitIds }, active: true }, select: { id: true } }),
       ]);
-      if (categories.length !== categoryIds.length || brands.length !== brandIds.length || units.length !== unitIds.length) {
-        throw new RequestValidationError("Select active category, brand, and unit values from the item master.");
+      if (units.length !== unitIds.length) {
+        throw new RequestValidationError("Select active unit values from the item master.");
       }
 
-      await transaction.item.createMany({ data: items });
+      const activeCategoryIds = new Set(categoryRecords.filter(({ active }) => active).map(({ id }) => id));
+      const activeBrandIds = new Set(brandRecords.filter(({ active }) => active).map(({ id }) => id));
+      const invalidLegacyCategoryId = items.some(({ categoryName, categoryId }) =>
+        categoryName === undefined && categoryId && !activeCategoryIds.has(categoryId));
+      const invalidLegacyBrandId = items.some(({ brandName, brandId }) =>
+        brandName === undefined && brandId && !activeBrandIds.has(brandId));
+      if (invalidLegacyCategoryId || invalidLegacyBrandId) {
+        throw new RequestValidationError("Select active category and brand values from the item master.");
+      }
+
+      const categoryLookup = buildMasterNameLookup(categoryRecords);
+      const brandLookup = buildMasterNameLookup(brandRecords);
+      let categoriesCreated = 0;
+      let categoriesReactivated = 0;
+      let brandsReactivated = 0;
+      let brandsAssignedToOther = 0;
+
+      for (const { categoryName } of items) {
+        if (!categoryName) continue;
+        const key = normalizeMasterName(categoryName);
+        const category = categoryLookup.get(key);
+        if (category?.active) continue;
+        if (category) {
+          const reactivated = await transaction.itemCategory.update({
+            where: { id: category.id },
+            data: { active: true },
+          });
+          categoryLookup.set(key, reactivated);
+          categoriesReactivated += 1;
+          await writeAudit(transaction, request.user?.id, "ACTIVATE", "ItemCategory", reactivated.id);
+          continue;
+        }
+        const created = await transaction.itemCategory.create({ data: { name: categoryName } });
+        categoryLookup.set(key, created);
+        categoriesCreated += 1;
+        await writeAudit(transaction, request.user?.id, "CREATE", "ItemCategory", created.id);
+      }
+
+      for (const { brandName } of items) {
+        if (brandName === undefined) continue;
+        if (!brandName) {
+          brandsAssignedToOther += 1;
+          continue;
+        }
+        const key = normalizeMasterName(brandName);
+        const brand = brandLookup.get(key);
+        if (!brand) {
+          brandsAssignedToOther += 1;
+          continue;
+        }
+        if (!brand.active) {
+          const reactivated = await transaction.brand.update({
+            where: { id: brand.id },
+            data: { active: true },
+          });
+          brandLookup.set(key, reactivated);
+          brandsReactivated += 1;
+          await writeAudit(transaction, request.user?.id, "ACTIVATE", "Brand", reactivated.id);
+        }
+      }
+
+      let otherBrand = brandsAssignedToOther
+        ? brandLookup.get(normalizeMasterName("Other"))
+        : undefined;
+      if (brandsAssignedToOther && !otherBrand) {
+        otherBrand = await transaction.brand.create({ data: { name: "Other" } });
+        brandLookup.set(normalizeMasterName("Other"), otherBrand);
+        await writeAudit(transaction, request.user?.id, "CREATE", "Brand", otherBrand.id);
+      } else if (otherBrand && !otherBrand.active) {
+        otherBrand = await transaction.brand.update({
+          where: { id: otherBrand.id },
+          data: { active: true },
+        });
+        brandLookup.set(normalizeMasterName("Other"), otherBrand);
+        brandsReactivated += 1;
+        await writeAudit(transaction, request.user?.id, "ACTIVATE", "Brand", otherBrand.id);
+      }
+
+      const importData = items.map(({ categoryName, brandName, categoryId, brandId, ...item }) => {
+        const category = categoryName
+          ? categoryLookup.get(normalizeMasterName(categoryName))
+          : undefined;
+        const requestedBrand = brandName
+          ? brandLookup.get(normalizeMasterName(brandName))
+          : undefined;
+        return {
+          ...item,
+          categoryId: categoryName !== undefined ? category?.id ?? null : categoryId ?? null,
+          brandId: brandName !== undefined
+            ? requestedBrand?.id ?? otherBrand?.id ?? null
+            : brandId ?? null,
+        };
+      });
+
+      await transaction.item.createMany({ data: importData });
       const created = await transaction.item.findMany({
         where: { code: { in: items.map(({ code }) => code) } },
         select: { id: true },
@@ -1117,8 +1207,36 @@ app.post(
           entityId: id,
         })),
       });
+      return { categoriesCreated, categoriesReactivated, brandsReactivated, brandsAssignedToOther };
     }, { maxWait: 10_000, timeout: 30_000 });
-    response.status(201).json({ imported: items.length });
+    response.status(201).json({ imported: items.length, ...importSummary });
+  }),
+);
+
+const itemSearchQuerySchema = z.object({
+  q: z.string().trim().max(100).default(""),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+app.get(
+  "/api/items/search",
+  requireAuth,
+  route(async (request, response) => {
+    const { q, limit } = itemSearchQuerySchema.parse(request.query);
+    const searchConditions: Prisma.ItemWhereInput[] = [
+      { name: { contains: q, mode: "insensitive" } },
+      { code: { contains: q, mode: "insensitive" } },
+      { modelSpecification: { contains: q, mode: "insensitive" } },
+      { category: { is: { name: { contains: q, mode: "insensitive" } } } },
+      { brand: { is: { name: { contains: q, mode: "insensitive" } } } },
+    ];
+    const found = await prisma.item.findMany({
+      where: { active: true, ...(q ? { OR: searchConditions } : {}) },
+      include: { category: true, brand: true, unit: true },
+      orderBy: [{ name: "asc" }, { code: "asc" }],
+      take: limit,
+    });
+    response.json(found);
   }),
 );
 

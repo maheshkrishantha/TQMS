@@ -3,6 +3,8 @@ import { strFromU8, unzipSync } from "fflate";
 const mainNamespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const relationshipNamespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
+export const MAX_ITEM_IMPORT_ROWS = 2000;
+
 export type XlsxRow = { rowNumber: number; cells: string[] };
 
 function parseXml(xml: string): Document {
@@ -63,7 +65,9 @@ export function readXlsxRows(bytes: Uint8Array): XlsxRow[] {
     : [];
   const worksheet = parseXml(strFromU8(worksheetXml));
   const rows = Array.from(worksheet.getElementsByTagNameNS(mainNamespace, "row"));
-  if (rows.length > 501) throw new Error("Import a maximum of 500 item rows at a time.");
+  if (rows.length > MAX_ITEM_IMPORT_ROWS + 1) {
+    throw new Error(`Import a maximum of ${MAX_ITEM_IMPORT_ROWS} item rows at a time.`);
+  }
 
   return rows.map((row, rowIndex) => {
     const cells: string[] = [];
