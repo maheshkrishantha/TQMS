@@ -2077,8 +2077,8 @@ function App() {
                 </div>
               </div>
               {user.role === "ADMIN" && !user.customRoleId && <section className="danger-zone">
-                <div><h2>Delete item master data</h2><p>Permanently remove all items, categories, brands, and units. Tender and registration history is preserved, so this action is blocked while any catalogue item is linked to those records.</p></div>
-                <button className="danger-button" onClick={() => void deleteAllItemMasterData()}>Delete all item master data</button>
+                <div><h2>Delete item master data</h2><p>Permanently remove all items, categories, brands, and units. Tender and registration history is preserved, so this action is blocked while any catalogue item is linked to those records. Deletion is temporarily disabled.</p></div>
+                <button className="danger-button" disabled title="Temporarily disabled" onClick={() => void deleteAllItemMasterData()}>Delete all item master data</button>
               </section>}
             </>
           )}
