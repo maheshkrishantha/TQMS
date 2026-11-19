@@ -17,6 +17,7 @@ test("API routes map to the expected permission and unknown routes stay unmapped
   assert.equal(permissionForRoute("GET", "/api/tenders"), "tenders.view");
   assert.deepEqual(permissionForRoute("GET", "/api/banks"), ["tenders.view", "registrationPayments.manage"]);
   assert.equal(permissionForRoute("GET", "/api/items/search"), "items.view");
+  assert.equal(permissionForRoute("DELETE", "/api/company/item-master"), "company.edit");
   assert.equal(permissionForRoute("POST", "/api/items/import"), "items.manage");
   assert.equal(permissionForRoute("PATCH", "/api/tenders/123/bid-bond"), "tenders.create");
   assert.equal(permissionForRoute("POST", "/api/tenders/123/documents"), "tenders.create");

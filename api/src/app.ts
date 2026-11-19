@@ -1066,6 +1066,53 @@ app.put(
   }),
 );
 
+app.delete(
+  "/api/company/item-master",
+  requireAuth,
+  requireCsrf,
+  adminOnly,
+  route(async (request, response) => {
+    try {
+      const result = await prisma.$transaction(async (transaction) => {
+        const [tenderReferences, registrationReferences] = await Promise.all([
+          transaction.tenderItem.count({ where: { itemId: { not: null } } }),
+          transaction.registrationItem.count(),
+        ]);
+        if (tenderReferences || registrationReferences) {
+          return { blocked: true, tenderReferences, registrationReferences };
+        }
+
+        const items = await transaction.item.deleteMany();
+        const categories = await transaction.itemCategory.deleteMany();
+        const brands = await transaction.brand.deleteMany();
+        const units = await transaction.unit.deleteMany();
+        const deleted = {
+          items: items.count,
+          categories: categories.count,
+          brands: brands.count,
+          units: units.count,
+        };
+        await writeAudit(transaction, request.user?.id, "DELETE_ALL", "ItemMaster", undefined, deleted);
+        return { blocked: false, deleted };
+      });
+
+      if (result.blocked) {
+        response.status(409).json({
+          error: `Cannot delete item master data while ${result.tenderReferences} tender item record(s) and ${result.registrationReferences} supplier registration item record(s) reference catalogue items.`,
+        });
+        return;
+      }
+      response.json(result.deleted);
+    } catch (reason) {
+      if (typeof reason === "object" && reason !== null && "code" in reason && reason.code === "P2003") {
+        response.status(409).json({ error: "Cannot delete item master data because catalogue items are still referenced by business records." });
+        return;
+      }
+      throw reason;
+    }
+  }),
+);
+
 app.post(
   "/api/items/import",
   requireAuth,
@@ -1114,6 +1161,7 @@ app.post(
       const brandLookup = buildMasterNameLookup(brandRecords);
       let categoriesCreated = 0;
       let categoriesReactivated = 0;
+      let brandsCreated = 0;
       let brandsReactivated = 0;
       let brandsAssignedToOther = 0;
 
@@ -1147,7 +1195,10 @@ app.post(
         const key = normalizeMasterName(brandName);
         const brand = brandLookup.get(key);
         if (!brand) {
-          brandsAssignedToOther += 1;
+          const created = await transaction.brand.create({ data: { name: brandName } });
+          brandLookup.set(key, created);
+          brandsCreated += 1;
+          await writeAudit(transaction, request.user?.id, "CREATE", "Brand", created.id);
           continue;
         }
         if (!brand.active) {
@@ -1207,7 +1258,7 @@ app.post(
           entityId: id,
         })),
       });
-      return { categoriesCreated, categoriesReactivated, brandsReactivated, brandsAssignedToOther };
+      return { categoriesCreated, categoriesReactivated, brandsCreated, brandsReactivated, brandsAssignedToOther };
     }, { maxWait: 10_000, timeout: 30_000 });
     response.status(201).json({ imported: items.length, ...importSummary });
   }),

@@ -1097,8 +1097,8 @@ function App() {
       const columns = {
         code: findColumn("itemcode", "code"),
         name: findColumn("itemname", "name"),
-        category: findColumn("category"),
-        brand: findColumn("brand"),
+        category: findColumn("category", "categoryname", "itemcategory"),
+        brand: findColumn("brand", "brandname", "itembrand"),
         model: findColumn("modelspecification", "model"),
         unit: findColumn("unit"),
         warranty: findColumn("warrantymonths", "warranty"),
@@ -1161,13 +1161,14 @@ function App() {
         throw new Error(`Import a maximum of ${MAX_ITEM_IMPORT_ROWS} item rows at a time.`);
       }
       if (!window.confirm(
-        `Import ${importedItems.length} item(s)? Missing categories will be created, matching inactive categories and brands reactivated, and blank or unmatched brands assigned to Other. Existing item codes will not be overwritten.`,
+        `Import ${importedItems.length} item(s)? Missing categories and brands will be created, matching inactive categories and brands reactivated, and blank brands assigned to Other. Existing item codes will not be overwritten.`,
       )) return;
 
       const result = await request<{
         imported: number;
         categoriesCreated: number;
         categoriesReactivated: number;
+        brandsCreated: number;
         brandsReactivated: number;
         brandsAssignedToOther: number;
       }>("/api/items/import", {
@@ -1178,6 +1179,7 @@ function App() {
       setCurrentPage(1);
       const details = [`Imported ${result.imported} item(s).`];
       if (result.categoriesCreated) details.push(`Created ${result.categoriesCreated} categor${result.categoriesCreated === 1 ? "y" : "ies"}.`);
+      if (result.brandsCreated) details.push(`Created ${result.brandsCreated} brand(s).`);
       const reactivatedMasters = result.categoriesReactivated + result.brandsReactivated;
       if (reactivatedMasters) details.push(`Reactivated ${reactivatedMasters} category/brand master record(s).`);
       if (result.brandsAssignedToOther) details.push(`Assigned ${result.brandsAssignedToOther} item(s) to Other brand.`);
@@ -1431,6 +1433,26 @@ function App() {
       await loadPage();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to deactivate record");
+    }
+  }
+
+  async function deleteAllItemMasterData() {
+    if (!window.confirm("Permanently delete every item, category, brand, and unit? This cannot be undone. Tender and registration records will be kept, and deletion will be blocked if they reference catalogue items.")) return;
+    setError("");
+    setSuccess("");
+    try {
+      const deleted = await request<{ items: number; categories: number; brands: number; units: number }>(
+        "/api/company/item-master",
+        { method: "DELETE" },
+        csrfToken,
+      );
+      setItems([]);
+      setCategories([]);
+      setBrands([]);
+      setUnits([]);
+      setSuccess(`Deleted ${deleted.items} item(s), ${deleted.categories} categor${deleted.categories === 1 ? "y" : "ies"}, ${deleted.brands} brand(s), and ${deleted.units} unit(s).`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to delete item master data");
     }
   }
 
@@ -2046,13 +2068,19 @@ function App() {
             </ListPage>
           )}
           {page === "company" && (
-            <div className="settings-layout">
-              <div className="settings-intro"><div className="large-icon"><Settings size={22} /></div><h2>Business settings</h2><p>Manage your company identity and the application theme used by your team.</p><div className="settings-note"><ShieldCheck size={16} /><span>Only Administrators may change business settings.</span></div></div>
-              <div className="editor-card readonly-company">
-                <div className="editor-heading"><div><h2>Business details</h2><p>All currency and tax values are stored with LKR as the base currency.</p></div>{user.role === "ADMIN" && <button className="primary-button" onClick={() => setCompanyEditorOpen(true)}>Edit business settings</button>}</div>
-                {company ? <dl>{Object.entries(company).filter(([key]) => key !== "updatedAt" && key !== "id" && key !== "theme").map(([key, value]) => <div key={key}><dt>{key.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`)}</dt><dd>{String(value ?? "—")}</dd></div>)}<div><dt>Application theme</dt><dd>{businessThemeLabels[company.theme]}</dd></div></dl> : <p>No company profile has been configured yet.</p>}
+            <>
+              <div className="settings-layout">
+                <div className="settings-intro"><div className="large-icon"><Settings size={22} /></div><h2>Business settings</h2><p>Manage your company identity and the application theme used by your team.</p><div className="settings-note"><ShieldCheck size={16} /><span>Only Administrators may change business settings.</span></div></div>
+                <div className="editor-card readonly-company">
+                  <div className="editor-heading"><div><h2>Business details</h2><p>All currency and tax values are stored with LKR as the base currency.</p></div>{user.role === "ADMIN" && !user.customRoleId && <button className="primary-button" onClick={() => setCompanyEditorOpen(true)}>Edit business settings</button>}</div>
+                  {company ? <dl>{Object.entries(company).filter(([key]) => key !== "updatedAt" && key !== "id" && key !== "theme").map(([key, value]) => <div key={key}><dt>{key.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`)}</dt><dd>{String(value ?? "—")}</dd></div>)}<div><dt>Application theme</dt><dd>{businessThemeLabels[company.theme]}</dd></div></dl> : <p>No company profile has been configured yet.</p>}
+                </div>
               </div>
-            </div>
+              {user.role === "ADMIN" && !user.customRoleId && <section className="danger-zone">
+                <div><h2>Delete item master data</h2><p>Permanently remove all items, categories, brands, and units. Tender and registration history is preserved, so this action is blocked while any catalogue item is linked to those records.</p></div>
+                <button className="danger-button" onClick={() => void deleteAllItemMasterData()}>Delete all item master data</button>
+              </section>}
+            </>
           )}
           {page === "users" && (
             <ListPage title="Sales reps & user access" description="Create Sales Rep accounts, assign province or district areas, manage roles, and deactivate access." count={users.length} query={query} onQuery={updateQuery} action={<><button className="secondary-button" onClick={() => navigate("roles")}>Create custom role</button><button className="primary-button" onClick={() => { setEditingUser(null); setUserEditorOpen(true); }}>＋ Add user</button></>}>
@@ -2133,7 +2161,7 @@ function App() {
               <FormActions onCancel={() => setInstitutionEditorOpen(false)} label="Add institution" />
             </form>
           </Modal>}
-          {companyEditorOpen && page === "company" && user.role === "ADMIN" && <Modal title="Edit business settings" onClose={() => setCompanyEditorOpen(false)}>
+          {companyEditorOpen && page === "company" && user.role === "ADMIN" && !user.customRoleId && <Modal title="Edit business settings" onClose={() => setCompanyEditorOpen(false)}>
             <form className="editor-card modal-form settings-form" onSubmit={(event) => void submitForm(event)}>
               <div className="editor-heading"><div><h2>Business details</h2><p>All currency and tax values are stored with LKR as the base currency.</p></div><FileText size={20} /></div>
               {error && <p className="feedback error-feedback" role="alert">{error}</p>}

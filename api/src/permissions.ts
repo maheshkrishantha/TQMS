@@ -65,6 +65,7 @@ const routePermissions: { method: string; path: RegExp; permission: string | str
   { method: "GET", path: /^\/api\/banks$/, permission: ["tenders.view", "registrationPayments.manage"] },
   { method: "GET", path: /^\/api\/company$/, permission: "company.view" },
   { method: "PUT", path: /^\/api\/company$/, permission: "company.edit" },
+  { method: "DELETE", path: /^\/api\/company\/item-master$/, permission: "company.edit" },
   { method: "GET", path: /^\/api\/(?:items|item-categories|brands|units)$/, permission: "items.view" },
   { method: "GET", path: /^\/api\/items\/search$/, permission: "items.view" },
   { method: "POST", path: /^\/api\/items\/import$/, permission: "items.manage" },
